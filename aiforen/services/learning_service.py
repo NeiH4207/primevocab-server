@@ -38,7 +38,10 @@ from aiforen.domain.vocab_calibration_cefr import (
     estimate_cefr_from_answers,
     pick_recommended_pack_id,
 )
-from aiforen.domain.vocab_daily_streak import compute_daily_streak
+from aiforen.domain.vocab_daily_streak import (
+    compute_daily_streak,
+    vocab_mistakes_from_daily_activity,
+)
 from aiforen.domain.vocab_learner_rhythm import (
     build_coach_overview_lines,
     classify_learner_rhythm,
@@ -1161,6 +1164,10 @@ class LearningService:
                     counts[day_key] = max(counts.get(day_key, 0), bump)
         return counts
 
+    def _vocab_daily_mistakes(self, stats: Dict[str, Any]) -> Dict[str, int]:
+        """Per-day vocab mistakes for heatmap tooltips."""
+        return vocab_mistakes_from_daily_activity(stats.get("daily_activity") or {})
+
     def _as_utc(self, dt: datetime) -> datetime:
         if dt.tzinfo is None:
             return dt.replace(tzinfo=ZoneInfo("UTC"))
@@ -1379,18 +1386,13 @@ class LearningService:
             end_dt = datetime(
                 day.year, day.month, day.day, 23, 59, 59, tzinfo=VN_TZ
             ).astimezone(ZoneInfo("UTC"))
-            learned = sum(
-                1
-                for p in progress
-                if self._progress_in_week_by(p, end_dt, week_start_utc)
+            learned_cum = sum(
+                1 for p in progress if self._progress_learned_by(p, end_dt)
             )
-            mastered = sum(
-                1
-                for p in progress
-                if self._progress_in_week_by(p, end_dt, week_start_utc)
-                and self._progress_mastered_by(p, end_dt)
+            mastered_cum = sum(
+                1 for p in progress if self._progress_mastered_by(p, end_dt)
             )
-            mastery_pct = 0.0 if learned == 0 else round(mastered / learned * 100, 1)
+            mastery_pct = round(mastered_cum / max(1, learned_cum) * 100, 1)
             days.append(
                 {
                     "date": key,
@@ -1442,7 +1444,7 @@ class LearningService:
         )
 
         for day in days:
-            day["mastery_peak_pct"] = display_mastery_rate
+            day["mastery_peak_pct"] = day["mastery_pct"]
 
         return {
             "words_this_week": words_this_week,
@@ -2933,6 +2935,7 @@ class LearningService:
             ):
                 due_today += 1
         daily_counts = self._vocab_daily_counts(stats, progress)
+        daily_mistakes = self._vocab_daily_mistakes(stats)
         if learned_today > 0:
             daily_counts[today] = max(daily_counts.get(today, 0), learned_today)
         packs = await self.list_vocab_packs(user_id=user_id, all_packs=True)
@@ -2956,6 +2959,7 @@ class LearningService:
             "mastered_words": mastered,
             "total_progress_words": len(progress),
             "vocab_daily_counts": daily_counts,
+            "vocab_daily_mistakes": daily_mistakes,
             "activity_today_key": today,
             "vocab_learned_by_category": await self._vocab_learned_by_category(
                 progress

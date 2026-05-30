@@ -59,7 +59,7 @@ python -m aiforen.scripts.vocab.cleanup_vocab_storage --dry-run
 python -m aiforen.scripts.vocab.cleanup_vocab_storage --clear-legacy-prompts
 ```
 
-`vocab_full_table.json` supplies lexeme/sense content (definitions, IPA, examples). It no longer writes `vi_translate_prompt` / `topic_prompt` (legacy Step-3 UI removed; production tasks like `translate_with_hints` come from quiz JSON).
+`vocab_full_table.json` supplies lexeme/sense content only (definitions, IPA, examples, packs). Quiz fields were stripped — see `vocab_storage/scripts/strip_vocab_full_table.py`. Production quiz is only in `quiz_*_vocab.json`.
 
 ## Pack membership (overlap / `source_packs`)
 

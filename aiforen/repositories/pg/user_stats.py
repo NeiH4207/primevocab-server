@@ -257,6 +257,8 @@ class UserStatsRepo:
         daily = copy.deepcopy(stats.get("daily_activity") or {})
         day_bucket = dict(daily.get(day_key) or {})
         day_bucket[prefix] = int(day_bucket.get(prefix) or 0) + 1
+        if prefix == "vocab" and not is_correct:
+            day_bucket["vocab_wrong"] = int(day_bucket.get("vocab_wrong") or 0) + 1
         daily[day_key] = day_bucket
         await self._update(
             user_id,

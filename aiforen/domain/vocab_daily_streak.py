@@ -70,3 +70,18 @@ def vocab_counts_from_daily_activity(
         if bump > 0:
             counts[day_key] = max(counts.get(day_key, 0), bump)
     return counts
+
+
+def vocab_mistakes_from_daily_activity(
+    daily_activity: Mapping[str, object]
+) -> dict[str, int]:
+    """Build YYYY-MM-DD -> vocab mistakes from user_stats.daily_activity."""
+    counts: dict[str, int] = {}
+    for day, payload in daily_activity.items():
+        day_key = str(day).strip()[:10]
+        if len(day_key) < 10 or not isinstance(payload, dict):
+            continue
+        wrong = int(payload.get("vocab_wrong") or 0)
+        if wrong > 0:
+            counts[day_key] = wrong
+    return counts

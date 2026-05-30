@@ -12,8 +12,9 @@ Triggers: push/merge to `main`, or manual **Run workflow** in GitHub Actions.
 
 | Secret | Value |
 |--------|--------|
-| `RAILWAY_TOKEN` | [Railway → Account → Tokens](https://railway.com/account/tokens) |
-| `RAILWAY_SERVICE_ID` | `py-server` (service name) or Service UUID from Railway → py-server → Settings |
+| `RAILWAY_TOKEN` | [Railway → Account → Tokens](https://railway.com/account/tokens) — **never commit or paste in chat** |
+| `RAILWAY_PROJECT_ID` | Railway project → Settings → **Project ID** |
+| `RAILWAY_SERVICE_ID` | `py-server` (service name) or Service UUID from **py-server** → Settings |
 
 ## Avoid double deploy
 

@@ -1934,11 +1934,6 @@ class LearningService:
                     lex_id = request_map.get(wid)
                     if lex_id:
                         progress = alias_to_progress.get(str(lex_id))
-                if progress and (
-                    progress.get("marked_known")
-                    or progress.get("mastery_level") == "mastered"
-                ):
-                    continue
                 selected_wids.append(wid)
                 mastery_steps[wid] = self._mastery_step_for(progress)
             hydrated_map = await self._get_vocab_words_batch(

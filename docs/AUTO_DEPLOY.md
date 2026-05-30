@@ -10,11 +10,12 @@ Triggers: push/merge to `main`, or manual **Run workflow** in GitHub Actions.
 
 **Settings → Secrets and variables → Actions → New repository secret**
 
-| Secret | Value |
-|--------|--------|
-| `RAILWAY_TOKEN` | [Railway → Account → Tokens](https://railway.com/account/tokens) — **never commit or paste in chat** |
-| `RAILWAY_PROJECT_ID` | Railway project → Settings → **Project ID** |
-| `RAILWAY_SERVICE_ID` | `py-server` (service name) or Service UUID from **py-server** → Settings |
+| Secret | Required | Value |
+|--------|----------|--------|
+| `RAILWAY_TOKEN` | **Yes** | **Project token** — Railway → project **helpful-learning** → **Settings → Tokens** → Create. **Do not** use [Account → Tokens](https://railway.com/account/tokens) (CI error: `Project Token not found`). |
+| `RAILWAY_SERVICE_ID` | No | `py-server` (default if omitted) or Service UUID from **py-server** → Settings |
+
+`RAILWAY_PROJECT_ID` is **not** needed when using a project token (the token is already scoped to one project/environment).
 
 ## Avoid double deploy
 

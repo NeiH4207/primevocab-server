@@ -1,5 +1,6 @@
-# Deploy API to Railway when main is updated (merge or push).
-# Required secrets: RAILWAY_TOKEN, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID (see docs/AUTO_DEPLOY.md)
+# Deploy API to Railway when main is updated.
+# Use a PROJECT token (not account token): Railway → Project → Settings → Tokens
+# Secrets: RAILWAY_TOKEN (required), RAILWAY_SERVICE_ID (optional, default py-server)
 
 name: Deploy API (production)
 
@@ -30,15 +31,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check RAILWAY_TOKEN is set
+        run: |
+          if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "::error::Missing GitHub secret RAILWAY_TOKEN"
+            echo "Create a PROJECT token: Railway → your project → Settings → Tokens"
+            echo "Do NOT use Account → Tokens (that causes 'Project Token not found')."
+            exit 1
+          fi
+
       - name: Deploy to Railway
         run: |
-          railway up \
-            --project "${{ secrets.RAILWAY_PROJECT_ID }}" \
-            --service "${{ secrets.RAILWAY_SERVICE_ID }}" \
-            --environment production \
-            --ci
+          set -euxo pipefail
+          SERVICE="${{ secrets.RAILWAY_SERVICE_ID }}"
+          if [ -z "${SERVICE}" ]; then
+            SERVICE="py-server"
+          fi
+          echo "Deploying service: ${SERVICE}"
+          railway up --service="${SERVICE}" --ci
 
-      - name: Smoke test health
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for health endpoint
         run: |
-          sleep 30
-          curl -fsS "https://py-server-production.up.railway.app/api/v1/health"
+          set -euo pipefail
+          URL="https://py-server-production.up.railway.app/api/v1/health"
+          for i in 1 2 3 4 5 6 8 10; do
+            if curl -fsS "$URL"; then
+              echo ""
+              echo "Health OK"
+              exit 0
+            fi
+            echo "Not ready yet (${i}/10), retry in 20s..."
+            sleep 20
+          done
+          echo "::error::Health check failed: $URL"
+          exit 1

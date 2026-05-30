@@ -55,6 +55,21 @@ class LLMProvider(Protocol):
         weakness_context: Optional[List[str]] = None,
     ) -> Dict[str, Any]: ...
 
+    async def evaluate_vocab_quiz(
+        self,
+        *,
+        task_type: str,
+        prompt: str,
+        context: str,
+        learner_answer: str,
+        target_word: str,
+        model_answer: str,
+        source_sentence: str = "",
+        rubric: Optional[List[str]] = None,
+        accepted_flexibility: str = "",
+        ai_scoring: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]: ...
+
     async def generate_vocab_daily_mission(
         self,
         *,

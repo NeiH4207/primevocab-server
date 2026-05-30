@@ -406,6 +406,7 @@ async def vocab_mcq_answer(
     return _wrap(
         await svc.submit_vocab_mcq(
             user_id=user.id,
+            plan_code=user.plan_code,
             word_id=word_id,
             selected_option_id=payload.selected_option_id,
             question_id=payload.question_id,

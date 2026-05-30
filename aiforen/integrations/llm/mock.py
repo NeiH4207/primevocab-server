@@ -450,6 +450,63 @@ class MockLLMProvider(LLMProvider):
             topic_sentence=topic_sentence,
         )
 
+    async def evaluate_vocab_quiz(
+        self,
+        *,
+        task_type: str,
+        prompt: str,
+        context: str,
+        learner_answer: str,
+        target_word: str,
+        model_answer: str,
+        source_sentence: str = "",
+        rubric: list[str] | None = None,
+        accepted_flexibility: str = "",
+        ai_scoring: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        from .json_utils import normalize_vocab_quiz_ai_feedback
+
+        _ = (task_type, prompt, context, source_sentence, rubric, accepted_flexibility)
+        s = learner_answer.strip()
+        word = target_word.lower()
+        if not s:
+            status = "fail"
+            score = 0
+        elif word not in s.lower():
+            status = "fail"
+            score = 1
+        elif len(s.split()) < 4:
+            status = "needs_fix"
+            score = 3
+        else:
+            model_norm = model_answer.strip().lower()
+            given_norm = s.lower()
+            if model_norm and (model_norm == given_norm or model_norm in given_norm):
+                status = "ok"
+                score = 5
+            else:
+                status = "ok"
+                score = 4
+        return normalize_vocab_quiz_ai_feedback(
+            {
+                "status": status,
+                "score": score,
+                "passed": status == "ok"
+                or score >= int((ai_scoring or {}).get("pass_score") or 4),
+                "uses_target_word": word in s.lower(),
+                "answers_task": len(s.split()) >= 3,
+                "corrected_sentence": s,
+                "recommendation": (
+                    f"Good use of '{target_word}'."
+                    if status == "ok"
+                    else f"Rewrite using '{target_word}' naturally for this prompt."
+                ),
+            },
+            learner_answer=learner_answer,
+            model_answer=model_answer,
+            ai_scoring=ai_scoring,
+        )
+
     async def evaluate_writing(
         self, *, task: Dict[str, Any], answer: str
     ) -> AsyncIterator[EvaluationStreamEvent]:

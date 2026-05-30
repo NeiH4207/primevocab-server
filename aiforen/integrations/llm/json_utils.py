@@ -198,6 +198,137 @@ def normalize_vocab_eval_payload(
     }
 
 
+def build_vocab_quiz_eval_prompt(
+    *,
+    task_type: str,
+    prompt: str,
+    context: str,
+    learner_answer: str,
+    target_word: str,
+    model_answer: str,
+    source_sentence: str = "",
+    rubric: Optional[List[str]] = None,
+    accepted_flexibility: str = "",
+    ai_scoring: Optional[Dict[str, Any]] = None,
+) -> str:
+    rubric_lines = "\n".join(
+        f"- {line}" for line in (rubric or []) if str(line).strip()
+    )
+    scoring = ai_scoring or {}
+    max_score = int(scoring.get("max_score") or 5)
+    pass_score = int(scoring.get("pass_score") or 4)
+    flex = (accepted_flexibility or "").strip()
+    flex_block = f"\nAcceptance note: {flex}\n" if flex else ""
+    context_block = (
+        f'\nContext / Vietnamese prompt: "{context.strip()}"\n'
+        if context.strip()
+        else ""
+    )
+    source_block = (
+        f'\nSource sentence to preserve: "{source_sentence.strip()}"\n'
+        if source_sentence.strip()
+        else ""
+    )
+    rubric_block = f"\nRubric:\n{rubric_lines}\n" if rubric_lines else ""
+    return (
+        "You are an IELTS vocabulary coach grading ONE learner production answer.\n"
+        f'Task type: "{task_type}"\n'
+        f'Target word: "{target_word}"\n'
+        f'Instruction shown to learner: "{prompt.strip()}"\n'
+        f"{context_block}"
+        f"{source_block}"
+        f'Learner answer: "{learner_answer.strip()}"\n'
+        f'Reference answer (one strong example, NOT the only acceptable answer): "{model_answer.strip()}"\n'
+        f"{flex_block}"
+        f"{rubric_block}\n"
+        "Rules:\n"
+        "- Learner must write ENGLISH (not Vietnamese).\n"
+        "- Accept any natural answer that satisfies the task, uses the target word correctly, "
+        "and preserves the source meaning when rewriting.\n"
+        "- Do NOT require exact wording match with the reference answer.\n"
+        "- status: ok = pass, needs_fix = minor issues but mostly correct, fail = wrong/missing target/off-task.\n"
+        f"- score: integer 0..{max_score}; passed: true when score >= {pass_score}.\n"
+        "- corrected_sentence: minimal edit; if ok, return learner answer unchanged.\n"
+        "- recommendation: max 2 sentences, specific, coach-like (Vietnamese OK in recommendation).\n\n"
+        "Return ONLY strict JSON:\n"
+        "{\n"
+        '  "status": "ok|needs_fix|fail",\n'
+        f'  "score": 0,\n'
+        '  "passed": false,\n'
+        '  "uses_target_word": true,\n'
+        '  "answers_task": true,\n'
+        '  "corrected_sentence": "...",\n'
+        '  "recommendation": "..."\n'
+        "}\n"
+    )
+
+
+def normalize_vocab_quiz_ai_feedback(
+    payload: Dict[str, Any],
+    *,
+    learner_answer: str,
+    model_answer: str,
+    ai_scoring: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    scoring = ai_scoring or {}
+    max_score = max(1, int(scoring.get("max_score") or 5))
+    pass_score = max(1, min(max_score, int(scoring.get("pass_score") or 4)))
+    raw_status = str(payload.get("status", "")).lower().strip()
+    if raw_status == "pass":
+        raw_status = "ok"
+    if raw_status not in ("ok", "needs_fix", "fail"):
+        raw_status = "ok" if payload.get("passed") else "needs_fix"
+
+    score_raw = payload.get("score")
+    if score_raw is None:
+        score = (
+            max_score
+            if raw_status == "ok"
+            else (pass_score - 1 if raw_status == "needs_fix" else 0)
+        )
+    else:
+        try:
+            score = int(score_raw)
+        except (TypeError, ValueError):
+            score = 0
+    score = max(0, min(max_score, score))
+
+    uses_target = bool(payload.get("uses_target_word", raw_status != "fail"))
+    answers_task = bool(payload.get("answers_task", raw_status != "fail"))
+    if not uses_target or not answers_task:
+        raw_status = "fail"
+        score = min(score, pass_score - 1)
+
+    if "passed" in payload:
+        passed = bool(payload.get("passed"))
+    elif scoring:
+        passed = score >= pass_score
+    else:
+        passed = raw_status == "ok"
+
+    if passed and raw_status == "fail":
+        raw_status = "needs_fix"
+    if not passed and raw_status == "ok" and score < pass_score:
+        raw_status = "needs_fix"
+
+    return {
+        "ai_status": "ok",
+        "passed": passed,
+        "score": score,
+        "max_score": max_score,
+        "pass_score": pass_score,
+        "status": raw_status,
+        "recommendation": _sanitize_recommendation(
+            str(payload.get("recommendation", ""))
+        ),
+        "corrected_sentence": _clamp_corrected_sentence(
+            str(payload.get("corrected_sentence", learner_answer)),
+            learner_answer,
+        ),
+        "model_answer": model_answer,
+    }
+
+
 def _vocab_mission_language_rules(locale: str) -> str:
     loc = (locale or "vi").lower()
     if loc.startswith("vi"):

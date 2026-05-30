@@ -534,6 +534,7 @@ def _mission_task_steps_for_block(block_type: str) -> List[str]:
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aiforen.core.errors import QuotaExceeded
 from aiforen.domain.enums import QuotaKind
 from aiforen.domain.vocab_mastery_score import (
     QUIZ_MATRIX_SLOTS,
@@ -557,6 +558,61 @@ from aiforen.repositories.pg.vocab_attempts import VocabAttemptRepo
 from aiforen.repositories.pg.vocab_lexicon import VocabLexiconRepo
 from aiforen.repositories.pg.writing import WritingSubmissionRepo
 from aiforen.services.quota_service import QuotaService
+
+_VIETNAMESE_CHAR_RE = re.compile(r"[\u00C0-\u024F\u1E00-\u1EFF]")
+
+
+def _friendly_vocab_ai_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "529" in text or "overloaded" in text:
+        return (
+            "The AI service is busy right now. Wait a few seconds, then try again — "
+            "your sentence is already saved."
+        )
+    if "429" in text or "rate" in text:
+        return "Too many AI requests. Please try again in a minute."
+    if "timeout" in text or "timed out" in text:
+        return "The AI request timed out. Please try again."
+    return "AI feedback is temporarily unavailable. Please try again shortly."
+
+
+def _looks_like_vietnamese(text: str) -> bool:
+    s = text.strip()
+    if len(s) < 2:
+        return False
+    return bool(_VIETNAMESE_CHAR_RE.search(s))
+
+
+def _vocab_quiz_invalid_language_feedback(*, learner_answer: str) -> Dict[str, Any]:
+    return {
+        "ai_status": "invalid_language",
+        "passed": False,
+        "status": "fail",
+        "unavailable_message": (
+            "Câu trả lời cần viết bằng tiếng Anh và có dùng từ mục tiêu. "
+            "Không gõ tiếng Việt vào ô này."
+        ),
+        "recommendation": (
+            "Viết câu tiếng Anh hoàn chỉnh, có dùng từ mục tiêu. "
+            "Ví dụ: dịch câu tiếng Việt ở đề sang English."
+        ),
+        "corrected_sentence": learner_answer,
+    }
+
+
+def _vocab_quiz_ai_unavailable_feedback(exc: Exception) -> Dict[str, Any]:
+    return {
+        "ai_status": "unavailable",
+        "passed": False,
+        "status": "fail",
+        "unavailable_message": _friendly_vocab_ai_error(exc),
+        "recommendation": "",
+    }
+
+
+def _quiz_production_needs_ai(question: Any) -> bool:
+    interaction = (getattr(question, "interaction_kind", None) or "mcq").strip().lower()
+    return interaction in ("free_text", "rewrite")
 
 
 class LearningService:
@@ -601,6 +657,147 @@ class LearningService:
             "exhausted": used >= limit,
             "period": "lifetime",
         }
+
+    async def _check_vocab_ai_quota(
+        self, user_id: str, plan_code: str
+    ) -> tuple[bool, Optional[str]]:
+        snap = await self.vocab_ai_quota_snapshot(user_id, plan_code)
+        if not snap.get("exhausted"):
+            return True, None
+        if snap.get("is_paid"):
+            return (
+                False,
+                "You've reached today's AI feedback limit. Try again tomorrow or upgrade your plan.",
+            )
+        return (
+            False,
+            "You've used all free AI evaluations. Upgrade to a vocab plan for more.",
+        )
+
+    async def _consume_vocab_ai_quota(
+        self, user_id: str, plan_code: str
+    ) -> tuple[bool, Optional[str]]:
+        is_paid = plan_code not in ("free", "guest")
+        quota = self._quota_service()
+        try:
+            if is_paid:
+                await quota.consume(user_id, QuotaKind.ai_feedback)
+            else:
+                await quota.consume(user_id, QuotaKind.vocab_ai_eval)
+            return True, None
+        except QuotaExceeded:
+            if is_paid:
+                return (
+                    False,
+                    "You've reached today's AI feedback limit. Try again tomorrow or upgrade your plan.",
+                )
+            return (
+                False,
+                "You've used all free AI evaluations. Upgrade to a vocab plan for more.",
+            )
+
+    async def _grade_vocab_quiz_with_ai(
+        self,
+        *,
+        user_id: str,
+        plan_code: str,
+        question: Any,
+        word: Dict[str, Any],
+        free_text_answer: str,
+    ) -> Tuple[
+        bool, Dict[str, Any], Optional[Dict[str, Any]], bool, bool, Optional[str]
+    ]:
+        """Returns is_correct, answer_meta, ai_feedback, ai_eval_failed, ai_quota_exceeded, upgrade_hint."""
+
+        payload = question.payload if isinstance(question.payload, dict) else {}
+        answer_meta: Dict[str, Any] = {
+            "interaction_kind": (question.interaction_kind or "free_text")
+            .strip()
+            .lower(),
+            "free_text_answer": free_text_answer.strip(),
+            "grading_method": payload.get("grading_method") or "ai_rubric",
+        }
+        model_answer = str(payload.get("model_answer") or "").strip()
+        answer_meta["model_answer"] = model_answer
+
+        allowed, upgrade_hint = await self._check_vocab_ai_quota(user_id, plan_code)
+        if not allowed:
+            is_correct, _, answer_meta = self._grade_vocab_quiz_answer(
+                question,
+                selected_option_id=None,
+                free_text_answer=free_text_answer,
+                reorder_order=None,
+            )
+            return is_correct, answer_meta, None, False, True, upgrade_hint
+
+        if _looks_like_vietnamese(free_text_answer):
+            feedback = _vocab_quiz_invalid_language_feedback(
+                learner_answer=free_text_answer
+            )
+            return False, answer_meta, feedback, False, False, None
+
+        target_word = str(
+            payload.get("target_word")
+            or payload.get("required_word")
+            or word.get("word")
+            or ""
+        ).strip()
+        prompt_text = str(question.prompt or "").strip()
+        context_text = str(question.context or payload.get("context") or "").strip()
+        task_type = str(
+            question.type or payload.get("task_type") or "production"
+        ).strip()
+        rubric = payload.get("ai_grading_rubric")
+        if not isinstance(rubric, list):
+            rubric = []
+        ai_scoring = payload.get("ai_scoring")
+        if not isinstance(ai_scoring, dict):
+            ai_scoring = None
+        flexibility = str(
+            payload.get("accepted_flexibility")
+            or payload.get("answer_flexibility")
+            or ""
+        ).strip()
+
+        ai_eval_failed = False
+        ai_feedback: Optional[Dict[str, Any]] = None
+        try:
+            ai_feedback = await get_llm_provider().evaluate_vocab_quiz(
+                task_type=task_type,
+                prompt=prompt_text,
+                context=context_text,
+                learner_answer=free_text_answer,
+                target_word=target_word,
+                model_answer=model_answer,
+                source_sentence=str(payload.get("source_sentence") or "").strip(),
+                rubric=[str(x) for x in rubric if str(x).strip()],
+                accepted_flexibility=flexibility,
+                ai_scoring=ai_scoring,
+            )
+            await self._consume_vocab_ai_quota(user_id, plan_code)
+        except Exception as exc:
+            ai_eval_failed = True
+            logger.error(
+                "vocab quiz AI eval failed user={} question={} err_type={} err={}",
+                user_id,
+                getattr(question, "id", None),
+                type(exc).__name__,
+                exc,
+            )
+            ai_feedback = _vocab_quiz_ai_unavailable_feedback(exc)
+            is_correct, _, answer_meta = self._grade_vocab_quiz_answer(
+                question,
+                selected_option_id=None,
+                free_text_answer=free_text_answer,
+                reorder_order=None,
+            )
+            answer_meta["ai_fallback_match"] = True
+            return is_correct, answer_meta, ai_feedback, ai_eval_failed, False, None
+
+        is_correct = bool(ai_feedback.get("passed"))
+        answer_meta["ai_score"] = ai_feedback.get("score")
+        answer_meta["ai_pass_score"] = ai_feedback.get("pass_score")
+        return is_correct, answer_meta, ai_feedback, False, False, None
 
     async def _record_vocab_personalization(
         self,
@@ -2482,6 +2679,7 @@ class LearningService:
         self,
         *,
         user_id: str,
+        plan_code: str = "free",
         word_id: str,
         selected_option_id: Optional[str] = None,
         question_id: Optional[str] = None,
@@ -2510,13 +2708,42 @@ class LearningService:
             ):
                 question_row = None
 
+        ai_feedback: Optional[Dict[str, Any]] = None
+        ai_eval_failed = False
+        ai_quota_exceeded = False
+        upgrade_hint: Optional[str] = None
+
         if question_row is not None:
-            is_correct, correct_option_id, answer_meta = self._grade_vocab_quiz_answer(
-                question_row,
-                selected_option_id=selected_option_id,
-                free_text_answer=free_text_answer,
-                reorder_order=reorder_order,
-            )
+            if (
+                _quiz_production_needs_ai(question_row)
+                and (free_text_answer or "").strip()
+            ):
+                (
+                    is_correct,
+                    answer_meta,
+                    ai_feedback,
+                    ai_eval_failed,
+                    ai_quota_exceeded,
+                    upgrade_hint,
+                ) = await self._grade_vocab_quiz_with_ai(
+                    user_id=user_id,
+                    plan_code=plan_code,
+                    question=question_row,
+                    word=word,
+                    free_text_answer=free_text_answer or "",
+                )
+                correct_option_id = str(
+                    (question_row.payload or {}).get("model_answer") or ""
+                )
+            else:
+                is_correct, correct_option_id, answer_meta = (
+                    self._grade_vocab_quiz_answer(
+                        question_row,
+                        selected_option_id=selected_option_id,
+                        free_text_answer=free_text_answer,
+                        reorder_order=reorder_order,
+                    )
+                )
             q_type = question_row.type
             resolved_qid = str(question_row.id)
         else:
@@ -2542,6 +2769,7 @@ class LearningService:
         state["last_mcq_result"] = {
             **answer_meta,
             "is_correct": is_correct,
+            "ai_feedback": ai_feedback,
             "created_at": now,
         }
         pack_id = (pack_id or word.get("pack_id") or "").strip()
@@ -2602,6 +2830,8 @@ class LearningService:
                 "attempt_type": "mcq",
                 "is_correct": is_correct,
                 "answer": answer_meta,
+                "ai_feedback": ai_feedback,
+                "ai_requested": ai_feedback is not None or ai_quota_exceeded,
                 "question_id": resolved_qid,
                 "question_type": q_type,
                 "created_at": now,
@@ -2638,6 +2868,15 @@ class LearningService:
             score=1.0 if is_correct else 0.0,
             time_taken=time_taken,
             answer_meta=answer_meta,
+            ai_eval_meta=(
+                {
+                    "ai_status": (ai_feedback or {}).get("ai_status"),
+                    "passed": (ai_feedback or {}).get("passed"),
+                    "score": (ai_feedback or {}).get("score"),
+                }
+                if ai_feedback
+                else None
+            ),
             weakness_tags=[] if is_correct else [f"{q_type or 'quiz'}_wrong"],
             occurred_at=now,
         )
@@ -2649,6 +2888,10 @@ class LearningService:
             "progress": saved,
             "mastery_delta_pct": round(mastery_delta, 4),
             "pack_mastery_pct": pack_pct,
+            "ai_feedback": ai_feedback,
+            "ai_eval_failed": ai_eval_failed,
+            "ai_quota_exceeded": ai_quota_exceeded,
+            "upgrade_hint": upgrade_hint,
         }
 
     async def get_vocab_stats(

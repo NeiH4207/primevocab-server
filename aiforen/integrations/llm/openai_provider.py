@@ -14,10 +14,12 @@ from .json_utils import (
     build_vocab_calibration_prompt,
     build_vocab_daily_mission_prompt,
     build_vocab_eval_prompt,
+    build_vocab_quiz_eval_prompt,
     extract_json,
     normalize_vocab_calibration_payload,
     normalize_vocab_daily_mission_payload,
     normalize_vocab_eval_payload,
+    normalize_vocab_quiz_ai_feedback,
     normalize_writing_assessment,
 )
 
@@ -114,6 +116,55 @@ class OpenAILLMProvider(LLMProvider):
             payload,
             translate_sentence=translate_sentence,
             topic_sentence=topic_sentence,
+        )
+
+    async def evaluate_vocab_quiz(
+        self,
+        *,
+        task_type: str,
+        prompt: str,
+        context: str,
+        learner_answer: str,
+        target_word: str,
+        model_answer: str,
+        source_sentence: str = "",
+        rubric: list[str] | None = None,
+        accepted_flexibility: str = "",
+        ai_scoring: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        settings = get_settings()
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is missing")
+
+        model = settings.openai_vocab_eval_model or settings.openai_model
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        eval_prompt = build_vocab_quiz_eval_prompt(
+            task_type=task_type,
+            prompt=prompt,
+            context=context,
+            learner_answer=learner_answer,
+            target_word=target_word,
+            model_answer=model_answer,
+            source_sentence=source_sentence,
+            rubric=rubric,
+            accepted_flexibility=accepted_flexibility,
+            ai_scoring=ai_scoring,
+        )
+
+        logger.info("Vocab quiz AI eval via OpenAI model={}", model)
+        resp = await client.responses.create(
+            model=model,
+            input=eval_prompt,
+            max_output_tokens=700,
+            temperature=0.1,
+        )
+        text = (resp.output_text or "").strip()
+        payload = extract_json(text)
+        return normalize_vocab_quiz_ai_feedback(
+            payload,
+            learner_answer=learner_answer,
+            model_answer=model_answer,
+            ai_scoring=ai_scoring,
         )
 
     async def evaluate_writing(

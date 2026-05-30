@@ -526,6 +526,18 @@ def _backfill_mission_pack_ids(
             block["pack_id"] = resolved
 
 
+def _dedupe_word_ids(word_ids: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for word_id in word_ids:
+        cleaned = str(word_id).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ordered.append(cleaned)
+    return ordered
+
+
 def _mission_task_steps_for_block(block_type: str) -> List[str]:
     if block_type in {"repair_weakness", "review_due"}:
         return ["mcq"]
@@ -3336,6 +3348,11 @@ class LearningService:
                 source=str(calibration_insight.get("source") or "calibration_insight"),
             )
             mission["calibration_completed"] = True
+            await self._hydrate_mission_plan_word_ids(
+                user_id=user_id,
+                mission=mission,
+                context=context,
+            )
             return mission
 
         cached = None
@@ -3372,6 +3389,11 @@ class LearningService:
             mission.setdefault("generated_at", cached.get("generated_at"))
             if cached_output.get("task_progress_hash"):
                 mission["task_progress_hash"] = cached_output["task_progress_hash"]
+            await self._hydrate_mission_plan_word_ids(
+                user_id=user_id,
+                mission=mission,
+                context=context,
+            )
             return mission
 
         provider_name = "mock"
@@ -3388,6 +3410,11 @@ class LearningService:
                 context=context,
                 mission_date=mission_date,
                 source="llm_generated",
+            )
+            await self._hydrate_mission_plan_word_ids(
+                user_id=user_id,
+                mission=mission,
+                context=context,
             )
             if self.personalization is not None:
                 await self.personalization.upsert_daily_mission(
@@ -3419,6 +3446,11 @@ class LearningService:
             )
             mission = self._fallback_vocab_mission(
                 context=context, mission_date=mission_date
+            )
+            await self._hydrate_mission_plan_word_ids(
+                user_id=user_id,
+                mission=mission,
+                context=context,
             )
             if self.personalization is not None:
                 await self.personalization.upsert_daily_mission(
@@ -3667,6 +3699,178 @@ class LearningService:
             for pack in ranked
             if pack.get("pack_id")
         ]
+
+    async def _mission_word_ids_for_pack(
+        self,
+        *,
+        user_id: str,
+        pack_id: str,
+        target: int,
+        mode: str,
+        exclude: Set[str],
+    ) -> List[str]:
+        words = await self._list_vocab_words(pack_id=pack_id, limit=500)
+        if not words:
+            return []
+
+        word_ids = [str(word["word_id"]) for word in words if word.get("word_id")]
+        progress_items = await self._pack_progress_items(
+            user_id=user_id,
+            pack_id=pack_id,
+            word_ids=word_ids,
+        )
+        now = datetime.now(timezone.utc)
+        progress_by_id: Dict[str, Dict[str, Any]] = {}
+        alias_to_progress: Dict[str, Dict[str, Any]] = {}
+        progress_content_ids = [p["content_id"] for p in progress_items]
+        all_ids = list({*progress_content_ids, *word_ids})
+        id_map = (
+            await self.lexicon.resolve_word_ids(all_ids)
+            if self.lexicon is not None
+            else {}
+        )
+        for progress in progress_items:
+            content_id = progress["content_id"]
+            alias_to_progress[content_id] = progress
+            lex_id = id_map.get(content_id)
+            if lex_id:
+                alias_to_progress[str(lex_id)] = progress
+        for word_id in word_ids:
+            row = alias_to_progress.get(word_id)
+            if row is None:
+                lex_id = id_map.get(word_id)
+                if lex_id:
+                    row = alias_to_progress.get(str(lex_id))
+            if row is not None:
+                progress_by_id[word_id] = row
+
+        due: List[str] = []
+        new: List[str] = []
+        for word_id in word_ids:
+            if word_id in exclude:
+                continue
+            progress = progress_by_id.get(word_id)
+            if progress and (
+                progress.get("marked_known")
+                or progress.get("mastery_level") == "mastered"
+            ):
+                continue
+            if progress and self._is_seen_today(
+                progress.get("last_seen_date"), progress.get("last_studied")
+            ):
+                continue
+            locked_until = progress.get("failed_locked_until") if progress else None
+            if locked_until and locked_until > now:
+                continue
+            next_review = _as_utc_aware(
+                ((progress or {}).get("spaced_repetition") or {}).get("next_review")
+            )
+            if progress and next_review and next_review <= now:
+                due.append(word_id)
+            elif not progress:
+                new.append(word_id)
+
+        random.shuffle(due)
+        random.shuffle(new)
+        if mode == "review_due":
+            pool = due or new
+        else:
+            pool = due + new
+        cap = max(1, min(target, 20))
+        return pool[:cap]
+
+    async def _hydrate_mission_plan_word_ids(
+        self,
+        *,
+        user_id: str,
+        mission: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> None:
+        recent_actions = context.get("recent_actions") or []
+        primary_cta = mission.get("primary_cta") or {}
+        default_pack_id = primary_cta.get("pack_id")
+        reserved: Set[str] = set()
+        practice_source: List[str] = []
+
+        async def fill_block(block: Dict[str, Any]) -> None:
+            nonlocal practice_source
+            block_type = str(block.get("type") or "study_pack")
+            existing = _dedupe_word_ids(
+                [str(word_id) for word_id in (block.get("word_ids") or [])]
+            )
+            target = max(1, min(int(block.get("target_count") or 8), 20))
+            if existing:
+                block["word_ids"] = existing[:target]
+                reserved.update(block["word_ids"])
+                if block_type in {"repair_weakness", "study_pack"}:
+                    practice_source.extend(block["word_ids"])
+                return
+
+            pack_id = block.get("pack_id") or default_pack_id
+            selected: List[str] = []
+            if block_type == "repair_weakness":
+                for action in recent_actions:
+                    if action.get("is_correct") is not False:
+                        continue
+                    word_id = str(action.get("word_id") or "").strip()
+                    if not word_id or word_id in reserved:
+                        continue
+                    selected.append(word_id)
+                    if len(selected) >= target:
+                        break
+                if not selected and pack_id:
+                    selected = await self._mission_word_ids_for_pack(
+                        user_id=user_id,
+                        pack_id=str(pack_id),
+                        target=target,
+                        mode="study_pack",
+                        exclude=reserved,
+                    )
+            elif block_type == "review_due" and pack_id:
+                selected = await self._mission_word_ids_for_pack(
+                    user_id=user_id,
+                    pack_id=str(pack_id),
+                    target=target,
+                    mode="review_due",
+                    exclude=reserved,
+                )
+            elif block_type == "production_practice":
+                selected = _dedupe_word_ids(practice_source or list(reserved))[:target]
+            elif pack_id:
+                selected = await self._mission_word_ids_for_pack(
+                    user_id=user_id,
+                    pack_id=str(pack_id),
+                    target=target,
+                    mode="study_pack",
+                    exclude=reserved,
+                )
+
+            block["word_ids"] = selected[:target]
+            reserved.update(block["word_ids"])
+            if block_type in {"repair_weakness", "study_pack"}:
+                practice_source.extend(block["word_ids"])
+
+        for block in mission.get("plan_blocks") or []:
+            if isinstance(block, dict):
+                await fill_block(block)
+
+        for block in mission.get("supplementary_plan_blocks") or []:
+            if isinstance(block, dict):
+                await fill_block(block)
+
+        if not primary_cta.get("word_ids"):
+            action_type = str(primary_cta.get("action_type") or "")
+            matched = next(
+                (
+                    block
+                    for block in (mission.get("plan_blocks") or [])
+                    if isinstance(block, dict) and block.get("type") == action_type
+                ),
+                None,
+            )
+            if matched and matched.get("word_ids"):
+                primary_cta["word_ids"] = list(matched["word_ids"])
+                mission["primary_cta"] = primary_cta
 
     def _finalize_vocab_mission_payload(
         self,

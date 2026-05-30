@@ -1,0 +1,15 @@
+.git
+.venv
+.conda
+__pycache__
+*.pyc
+.pytest_cache
+aiforen_legacy
+crawled_ielts_tasks.json
+docs
+static
+stores
+*.legacy.*
+node_modules
+.env
+.env.local

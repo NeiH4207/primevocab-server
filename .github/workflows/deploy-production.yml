@@ -1,0 +1,43 @@
+# Deploy API to Railway when main is updated (merge or push).
+# Required secrets: RAILWAY_TOKEN, RAILWAY_SERVICE_ID (see docs/AUTO_DEPLOY.md)
+
+name: Deploy API (production)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: railway-production
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t primevocab-api:ci .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Railway
+        run: |
+          railway up \
+            --service "${{ secrets.RAILWAY_SERVICE_ID }}" \
+            --environment production \
+            --ci
+
+      - name: Smoke test health
+        run: |
+          sleep 30
+          curl -fsS "https://py-server-production.up.railway.app/api/v1/health"

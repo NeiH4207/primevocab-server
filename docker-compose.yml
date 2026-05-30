@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aiforen
+      POSTGRES_PASSWORD: aiforen_dev
+      POSTGRES_DB: aiforen
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiforen"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &app_env
+      APP_ENV: dev
+      DEBUG: "true"
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: aiforen
+      PG_PASSWORD: aiforen_dev
+      PG_DB: aiforen
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: dev-secret-change-me
+      JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-10080}
+      JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-365}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
+      ANTHROPIC_VOCAB_EVAL_MODEL: ${ANTHROPIC_VOCAB_EVAL_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OPENAI_VOCAB_EVAL_MODEL: ${OPENAI_VOCAB_EVAL_MODEL:-}
+      PAYMENT_PROVIDER: mock
+      FRONTEND_BASE_URL: http://localhost:3000
+      CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  seed:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment: *app_env
+    command: ["python", "-m", "aiforen.scripts.seed"]
+    restart: "no"
+
+  api:
+    platform: linux/amd64
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *app_env
+    ports:
+      - "8000:8000"
+    command:
+      [
+        "uvicorn",
+        "aiforen.app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
+    volumes:
+      - ./aiforen:/app/aiforen:ro
+      - ./main.py:/app/main.py:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  worker:
+    platform: linux/amd64
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *app_env
+    command: ["python", "-m", "aiforen.workers.assess_worker"]
+    volumes:
+      - ./aiforen:/app/aiforen:ro
+
+volumes:
+  pg_data:

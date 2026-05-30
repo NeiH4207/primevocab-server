@@ -1,0 +1,5 @@
+# One-time Mongo → Postgres migration (run before removing Mongo service).
+#   pip install motor pymongo
+#   MONGO_URL=... python -m aiforen.scripts.migrate_mongo_to_postgres
+motor==3.7.1
+pymongo==4.10.1

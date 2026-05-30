@@ -1,0 +1,37 @@
+alembic>=1.13.0
+anthropic
+asyncpg>=0.29.0
+bcrypt==4.3.0
+email-validator>=2.1.0
+# Web framework
+fastapi==0.115.13
+google-auth==2.40.3
+gunicorn>=22.0.0
+httpx==0.28.1
+
+# Logging
+loguru>=0.7.2,<0.8
+openai>=1.68.0
+openpyxl>=3.1.0
+pandas>=2.0.0
+pdfplumber>=0.11.0
+psycopg2-binary>=2.9.0  # alembic offline + admin scripts
+
+# Settings + validation
+pydantic==2.11.7
+pydantic-settings==2.9.1
+
+# Auth
+PyJWT>=2.8.0
+
+# Misc
+python-dotenv==1.1.0
+python-multipart==0.0.16
+
+# Redis
+redis>=5.0.0
+
+# Postgres (async SQLAlchemy)
+sqlalchemy[asyncio]>=2.0.30
+transipy==1.0.6
+uvicorn[standard]==0.34.3

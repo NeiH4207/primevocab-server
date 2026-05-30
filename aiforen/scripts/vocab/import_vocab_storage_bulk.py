@@ -21,7 +21,13 @@ import psycopg2.extras
 from loguru import logger
 
 from aiforen.repositories.pg.vocab_lexicon import lexeme_id_for
-from aiforen.scripts.vocab.import_vocab_storage import DEFAULT_STORAGE, _normalize_pos
+from aiforen.scripts.vocab.import_vocab_storage import _normalize_pos
+from aiforen.scripts.vocab.pack_membership import (
+    DEFAULT_STORAGE,
+    build_pack_membership_items,
+    lexeme_id_for_vocab_row,
+    pack_ids_for_vocab_row,
+)
 from aiforen.scripts.vocab.pack_specs import infer_stat_labels
 from aiforen.scripts.vocab.quiz_import_utils import (
     question_row_from_quiz,
@@ -173,18 +179,13 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
 
 
 def import_packs(conn, rows: List[Dict[str, Any]]) -> None:
-    by_pack: Dict[str, List[Tuple[int, uuid.UUID, List[str]]]] = defaultdict(list)
-    for row in rows:
-        pack_id = row.get("pack_id")
-        if not pack_id:
-            continue
-        by_pack[str(pack_id)].append(
-            (
-                int(row.get("vocab_index") or 0),
-                _lid(row),
-                infer_stat_labels(row.get("lemma") or ""),
-            )
-        )
+    by_pack = build_pack_membership_items(rows, lid_for_row=lexeme_id_for_vocab_row)
+    multi = sum(1 for r in rows if len(pack_ids_for_vocab_row(r)) > 1)
+    logger.info(
+        "Pack membership: {} packs, {} rows with multiple source_packs",
+        len(by_pack),
+        multi,
+    )
 
     cur = conn.cursor()
     for pack_id, items in sorted(by_pack.items()):
@@ -320,7 +321,16 @@ def main() -> None:
     parser.add_argument("--skip-packs", action="store_true")
     parser.add_argument("--skip-lexemes", action="store_true")
     parser.add_argument("--skip-senses", action="store_true")
+    parser.add_argument(
+        "--packs-only",
+        action="store_true",
+        help="Rebuild vocab_pack_items only (skip lexemes, senses, questions)",
+    )
     args = parser.parse_args()
+    if args.packs_only:
+        args.skip_lexemes = True
+        args.skip_senses = True
+        args.skip_questions = True
 
     storage = Path(os.environ.get("VOCAB_STORAGE_DIR", DEFAULT_STORAGE))
     vocab_path = storage / "vocab_full_table.json"

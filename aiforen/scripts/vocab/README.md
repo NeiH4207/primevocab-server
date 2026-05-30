@@ -43,6 +43,18 @@ Do **not** run `build_band_packs` after fill — it resets packs to ~10 core wor
 python -m aiforen.scripts.vocab.consolidate_packs
 ```
 
+## Pack membership (overlap / `source_packs`)
+
+`vocab_full_table.json` rows list every pack in **`source_packs`**. Importers write **one `vocab_pack_items` row per (pack, lexeme)** so the frontend library matches membership counts (not only primary `pack_id`).
+
+```bash
+# Rebuild pack items only (fast)
+DATABASE_URL=postgresql://... python -m aiforen.scripts.vocab.import_vocab_storage_bulk --packs-only
+
+# Compare JSON membership vs DB
+DATABASE_URL=postgresql://... python -m aiforen.scripts.vocab.verify_pack_membership
+```
+
 ## 4. Backfill definition + phonetic + example (dictionaryapi.dev)
 
 ```bash

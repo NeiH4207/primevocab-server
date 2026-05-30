@@ -5,7 +5,8 @@ Data source (repo sibling):
   - vocab_storage/quiz_*_vocab.json      (~48k MCQ rows; non-MCQ skipped)
 
 Matches lexemes by (lemma, pos) using lexeme_id_for() so existing production rows
-are enriched in place. Rebuilds pack_items from pack_id on each vocab row.
+are enriched in place. Rebuilds pack_items from **source_packs** (fallback pack_id)
+so overlap membership matches the frontend library.
 
 Usage:
   python -m aiforen.scripts.vocab.import_vocab_storage
@@ -45,6 +46,11 @@ from aiforen.scripts.vocab.oxford_packs import (
 from aiforen.scripts.vocab.pack_specs import infer_stat_labels
 
 DEFAULT_STORAGE = Path(__file__).resolve().parents[4] / "vocab_storage"
+
+from aiforen.scripts.vocab.pack_membership import (  # noqa: E402
+    build_pack_membership_items,
+    pack_ids_for_vocab_row,
+)
 
 QUIZ_TASK_TO_DB = {
     "meaning_in_context": "meaning_mcq",
@@ -338,17 +344,12 @@ async def import_pack_items(
     *,
     dry_run: bool,
 ) -> None:
-    by_pack: Dict[str, List[Tuple[int, uuid.UUID, List[str]]]] = defaultdict(list)
-    for row in rows:
-        pack_id = row.get("pack_id")
-        if not pack_id:
-            continue
-        lemma = (row.get("lemma") or "").strip().lower()
+    def _lid(row: Dict[str, Any]) -> uuid.UUID:
+        lemma = (row.get("lemma") or row.get("display_word") or "").strip().lower()
         pos = _normalize_pos(row.get("pos") or "noun")
-        lid = lexeme_id_for(lemma, pos)
-        idx = int(row.get("vocab_index") or 0)
-        labels = infer_stat_labels(lemma)
-        by_pack[str(pack_id)].append((idx, lid, labels))
+        return lexeme_id_for(lemma, pos)
+
+    by_pack = build_pack_membership_items(rows, lid_for_row=_lid)
 
     if dry_run:
         for pack_id, items in by_pack.items():

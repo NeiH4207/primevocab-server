@@ -1,4 +1,4 @@
-"""Oxford 5000 / CEFR packs (A1–C1) — separate from IELTS band packs."""
+"""Oxford 5000 / CEFR packs (A1–C2) — separate from IELTS band packs."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ LEVEL_TO_PACK: Dict[str, str] = {
     "B1": "pack_oxford_b1",
     "B2": "pack_oxford_b2",
     "C1": "pack_oxford_c1",
+    "C2": "pack_oxford_c2",
 }
 
 # Approximate IELTS band range for UI filters (not exam targets).
@@ -23,6 +24,7 @@ CEFR_IELTS_BAND: Dict[str, Tuple[float, float]] = {
     "B1": (5.0, 6.5),
     "B2": (6.0, 7.5),
     "C1": (7.0, 9.0),
+    "C2": (8.0, 9.0),
 }
 
 POS_MAP: Dict[str, str] = {
@@ -131,6 +133,18 @@ OXFORD_PACKS: List[Dict[str, Any]] = [
         "cefr_level": "C1",
         "oxford_level": "C1",
         "sort_order": 15,
+        "is_premium": True,
+    },
+    {
+        "pack_id": "pack_oxford_c2",
+        "title": "Oxford 5000 — C2",
+        "description": "CEFR C2 proficiency vocabulary (extended curated list).",
+        "category": "Oxford C2",
+        "pack_family": "cefr",
+        "exam_type": "oxford",
+        "cefr_level": "C2",
+        "oxford_level": "C2",
+        "sort_order": 16,
         "is_premium": True,
     },
 ]

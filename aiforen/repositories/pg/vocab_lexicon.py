@@ -349,6 +349,10 @@ class VocabLexiconRepo:
         return sorted({r[0] for r in (await self.s.execute(stmt)).all() if r[0]})
 
     def _pack_to_dict(self, pack: VocabPack) -> Dict[str, Any]:
+        pack_id = str(pack.pack_id or "")
+        pack_family = getattr(pack, "pack_family", "band") or "band"
+        if pack_id.startswith("pack_oxford_"):
+            pack_family = "cefr"
         return {
             "pack_id": pack.pack_id,
             "title": pack.title,
@@ -365,7 +369,9 @@ class VocabLexiconRepo:
             "sort_order": pack.sort_order,
             "is_active": pack.is_active,
             "is_premium": pack.is_premium,
-            "pack_family": getattr(pack, "pack_family", "band"),
+            "pack_family": pack_family,
+            "cefr_level": getattr(pack, "cefr_level", None)
+                or (pack_id.replace("pack_oxford_", "").upper() if pack_id.startswith("pack_oxford_") else None),
             "content_status": getattr(pack, "content_status", "draft"),
             "target_word_count": getattr(pack, "target_word_count", 12),
             "completed_word_count": getattr(pack, "completed_word_count", 0),

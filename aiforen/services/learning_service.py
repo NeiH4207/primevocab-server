@@ -743,7 +743,7 @@ class LearningService:
             or ""
         ).strip()
         prompt_text = str(question.prompt or "").strip()
-        context_text = str(question.context or payload.get("context") or "").strip()
+        context_text = str(payload.get("context") or "").strip()
         task_type = str(
             question.type or payload.get("task_type") or "production"
         ).strip()
@@ -2732,9 +2732,12 @@ class LearningService:
                     word=word,
                     free_text_answer=free_text_answer or "",
                 )
-                correct_option_id = str(
-                    (question_row.payload or {}).get("model_answer") or ""
+                q_payload = (
+                    question_row.payload
+                    if isinstance(question_row.payload, dict)
+                    else {}
                 )
+                correct_option_id = str(q_payload.get("model_answer") or "")
             else:
                 is_correct, correct_option_id, answer_meta = (
                     self._grade_vocab_quiz_answer(
@@ -2821,6 +2824,12 @@ class LearningService:
                 "next_review": state["failed_locked_until"],
             }
 
+        if isinstance(answer_meta, dict):
+            if resolved_qid:
+                answer_meta["question_id"] = resolved_qid
+            if q_type:
+                answer_meta["question_type"] = q_type
+
         await self.vocab_attempts.insert(
             {
                 "attempt_id": f"vatt_{secrets.token_urlsafe(10)}",
@@ -2831,9 +2840,6 @@ class LearningService:
                 "is_correct": is_correct,
                 "answer": answer_meta,
                 "ai_feedback": ai_feedback,
-                "ai_requested": ai_feedback is not None or ai_quota_exceeded,
-                "question_id": resolved_qid,
-                "question_type": q_type,
                 "created_at": now,
             }
         )

@@ -43,6 +43,24 @@ Do **not** run `build_band_packs` after fill — it resets packs to ~10 core wor
 python -m aiforen.scripts.vocab.consolidate_packs
 ```
 
+## Quiz content (single source of truth)
+
+Production quiz lives only in `vocab_storage/quiz_*_vocab.json` → `vocab_questions` with `generator_meta.source = 'vocab_storage'`.
+
+```bash
+export VOCAB_STORAGE_DIR=/path/to/vocab_storage
+export DATABASE_URL="$DATABASE_PUBLIC_URL"
+
+# Import / refresh all quiz rows
+python -m aiforen.scripts.vocab.import_vocab_storage_bulk --questions-only
+
+# Remove LLM/bootstrap duplicates + optional legacy sense prompts
+python -m aiforen.scripts.vocab.cleanup_vocab_storage --dry-run
+python -m aiforen.scripts.vocab.cleanup_vocab_storage --clear-legacy-prompts
+```
+
+`vocab_full_table.json` supplies lexeme/sense content (definitions, IPA, examples). It no longer writes `vi_translate_prompt` / `topic_prompt` (legacy Step-3 UI removed; production tasks like `translate_with_hints` come from quiz JSON).
+
 ## Pack membership (overlap / `source_packs`)
 
 `vocab_full_table.json` rows list every pack in **`source_packs`**. Importers write **one `vocab_pack_items` row per (pack, lexeme)** so the frontend library matches membership counts (not only primary `pack_id`).

@@ -34,6 +34,14 @@ def lexeme_id_for(lemma: str, pos: str) -> uuid.UUID:
     return uuid.uuid5(LEXEME_NAMESPACE, key)
 
 
+VOCAB_STORAGE_SOURCE = "vocab_storage"
+
+
+def _is_vocab_storage_question(q: VocabQuestion) -> bool:
+    meta = q.generator_meta if isinstance(q.generator_meta, dict) else {}
+    return (meta.get("source") or "").strip() == VOCAB_STORAGE_SOURCE
+
+
 def _band_difficulty_label(band: float) -> str:
     if band <= 5.0:
         return "beginner"
@@ -371,7 +379,11 @@ class VocabLexiconRepo:
             "is_premium": pack.is_premium,
             "pack_family": pack_family,
             "cefr_level": getattr(pack, "cefr_level", None)
-                or (pack_id.replace("pack_oxford_", "").upper() if pack_id.startswith("pack_oxford_") else None),
+            or (
+                pack_id.replace("pack_oxford_", "").upper()
+                if pack_id.startswith("pack_oxford_")
+                else None
+            ),
             "content_status": getattr(pack, "content_status", "draft"),
             "target_word_count": getattr(pack, "target_word_count", 12),
             "completed_word_count": getattr(pack, "completed_word_count", 0),
@@ -399,11 +411,16 @@ class VocabLexiconRepo:
         sense_id: Optional[uuid.UUID] = None,
     ) -> Optional[VocabQuestion]:
         approved = [
-            q for q in (lexeme.questions or []) if q.status in ("validated", "approved")
+            q
+            for q in (lexeme.questions or [])
+            if q.status in ("validated", "approved") and _is_vocab_storage_question(q)
         ]
         if not approved:
-            # LLM/batch pipeline writes "generated" until human review; still show in study flow.
-            approved = [q for q in (lexeme.questions or []) if q.status == "generated"]
+            approved = [
+                q
+                for q in (lexeme.questions or [])
+                if q.status == "generated" and _is_vocab_storage_question(q)
+            ]
         if not approved:
             return None
         if mastery_step <= 2:
@@ -423,6 +440,7 @@ class VocabLexiconRepo:
             q
             for q in (lexeme.questions or [])
             if q.status in ("validated", "approved", "generated")
+            and _is_vocab_storage_question(q)
         ]
         return sorted(
             rows,
@@ -517,8 +535,6 @@ class VocabLexiconRepo:
                 "tips": [],
                 "mcq": None,
                 "vi_prompt": None,
-                "vi_translate_prompt": None,
-                "topic_prompt": None,
                 "example_good_sentence": None,
                 "tags": [lexeme.lemma],
                 "total_attempts": 0,
@@ -610,9 +626,6 @@ class VocabLexiconRepo:
             "mcq": mcq,
             "quiz_track_id": track,
             "quiz_steps": quiz_steps,
-            "vi_prompt": sense.vi_translate_prompt,
-            "vi_translate_prompt": sense.vi_translate_prompt,
-            "topic_prompt": sense.topic_prompt,
             "example_good_sentence": example,
             "tags": list(sense.topic_tags or []),
             "total_attempts": 0,
@@ -818,6 +831,7 @@ class VocabLexiconRepo:
         """One row per (lexeme_id, type); updates canonical row and drops duplicates."""
         meta = generator_meta or {}
         preferred_sources = (
+            VOCAB_STORAGE_SOURCE,
             "llm_mcq_openai",
             "llm_mcq_batch",
             "enrich_pack",

@@ -22,7 +22,6 @@ import asyncio
 import json
 import os
 import uuid
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,7 +42,6 @@ from aiforen.scripts.vocab.oxford_packs import (
     OXFORD_PACKS,
     normalize_pos,
 )
-from aiforen.scripts.vocab.pack_specs import infer_stat_labels
 
 DEFAULT_STORAGE = Path(__file__).resolve().parents[4] / "vocab_storage"
 
@@ -293,8 +291,6 @@ async def import_lexemes(
             lexeme_id,
             definition_en=(row.get("definition_en") or lemma).strip(),
             vi_gloss=row.get("vi_gloss"),
-            vi_translate_prompt=row.get("vi_translate_prompt"),
-            topic_prompt=row.get("topic_prompt"),
             usage_note=row.get("usage_note") or row.get("common_mistake"),
             ielts_example=row.get("example") or row.get("ielts_example"),
             gre_example=row.get("gre_example"),

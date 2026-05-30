@@ -11,8 +11,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 import uuid
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -21,7 +21,7 @@ import psycopg2.extras
 from loguru import logger
 
 from aiforen.repositories.pg.vocab_lexicon import lexeme_id_for
-from aiforen.scripts.vocab.import_vocab_storage import _normalize_pos
+from aiforen.scripts.vocab.oxford_packs import normalize_pos
 from aiforen.scripts.vocab.pack_membership import (
     DEFAULT_STORAGE,
     build_pack_membership_items,
@@ -37,11 +37,26 @@ from aiforen.scripts.vocab.quiz_import_utils import (
 BATCH = 500
 
 
+def _normalize_pos(raw: str) -> str:
+    return normalize_pos((raw or "noun").strip().lower())
+
+
 def _pg_url() -> str:
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
         raise SystemExit("Set DATABASE_URL (postgresql://, not +asyncpg)")
     return url.replace("postgresql+asyncpg://", "postgresql://")
+
+
+def _connect_pg():
+    return psycopg2.connect(
+        _pg_url(),
+        connect_timeout=60,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
 
 
 def _lid(row: Dict[str, Any]) -> uuid.UUID:
@@ -126,8 +141,6 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
                 (
                     def_en,
                     row.get("vi_gloss"),
-                    row.get("vi_translate_prompt"),
-                    row.get("topic_prompt"),
                     row.get("usage_note") or row.get("common_mistake"),
                     row.get("example") or row.get("ielts_example"),
                     row.get("gre_example"),
@@ -157,8 +170,6 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
             UPDATE vocab_senses SET
               definition_en = %s,
               vi_gloss = %s,
-              vi_translate_prompt = %s,
-              topic_prompt = %s,
               usage_note = %s,
               ielts_example = %s,
               gre_example = %s,
@@ -176,6 +187,55 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
         conn.commit()
         logger.info("Senses updated {}/{}", min(i + BATCH, len(rows)), len(rows))
     cur.close()
+
+
+def upsert_pack_items_for_rows(conn, rows: List[Dict[str, Any]]) -> None:
+    """Add/update pack_items for given rows only (no pack-wide DELETE)."""
+
+    cur = conn.cursor()
+    touched_packs: set[str] = set()
+    upserted = 0
+    for row in rows:
+        lid = lexeme_id_for_vocab_row(row)
+        order = int(row.get("vocab_index") or 0)
+        labels = infer_stat_labels((row.get("lemma") or row.get("display_word") or ""))
+        for pack_id in pack_ids_for_vocab_row(row):
+            cur.execute(
+                """
+                INSERT INTO vocab_pack_items (
+                  id, pack_id, lexeme_id, order_index, is_core, stat_labels
+                ) VALUES (gen_random_uuid(), %s, %s::uuid, %s, %s, %s)
+                ON CONFLICT (pack_id, lexeme_id) DO UPDATE SET
+                  order_index = EXCLUDED.order_index,
+                  stat_labels = EXCLUDED.stat_labels
+                """,
+                (pack_id, str(lid), order, True, labels),
+            )
+            touched_packs.add(pack_id)
+            upserted += 1
+    conn.commit()
+    for pack_id in sorted(touched_packs):
+        cur.execute(
+            "SELECT count(*) FROM vocab_pack_items WHERE pack_id = %s",
+            (pack_id,),
+        )
+        n = cur.fetchone()[0]
+        cur.execute(
+            """
+            UPDATE vocab_packs SET
+              target_word_count = %s,
+              completed_word_count = %s,
+              content_status = 'complete',
+              updated_at = NOW()
+            WHERE pack_id = %s
+            """,
+            (n, n, pack_id),
+        )
+    conn.commit()
+    cur.close()
+    logger.info(
+        "Pack items upserted {} links across {} packs", upserted, len(touched_packs)
+    )
 
 
 def import_packs(conn, rows: List[Dict[str, Any]]) -> None:
@@ -278,14 +338,41 @@ def import_questions(conn, storage: Path) -> None:
 
     rows = list(pending.values())
     inserted = 0
-    for i in range(0, len(rows), BATCH):
-        chunk = rows[i : i + BATCH]
-        _flush_questions(cur, conn, chunk)
+    cur.close()
+    conn.close()
+    q_batch = 200
+    for i in range(0, len(rows), q_batch):
+        chunk = rows[i : i + q_batch]
+        for attempt in range(6):
+            conn = None
+            try:
+                conn = _connect_pg()
+                cur = conn.cursor()
+                _flush_questions(cur, conn, chunk)
+                cur.close()
+                conn.close()
+                break
+            except psycopg2.OperationalError as exc:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                if attempt >= 5:
+                    raise
+                wait = min(30, 2**attempt)
+                logger.warning(
+                    "Question batch {}-{} failed (attempt {}): {} — retry in {}s",
+                    i,
+                    i + len(chunk),
+                    attempt + 1,
+                    exc,
+                    wait,
+                )
+                time.sleep(wait)
         inserted += len(chunk)
         if inserted % 5000 == 0 or inserted == len(rows):
             logger.info("Questions inserted: {}/{}", inserted, len(rows))
-
-    cur.close()
     logger.info(
         "Questions done: inserted={}, unique_slots={}, skipped={}",
         inserted,
@@ -326,25 +413,51 @@ def main() -> None:
         action="store_true",
         help="Rebuild vocab_pack_items only (skip lexemes, senses, questions)",
     )
+    parser.add_argument(
+        "--pack-items-only",
+        action="store_true",
+        help="Upsert pack_items for selected rows only (no DELETE per pack)",
+    )
+    parser.add_argument(
+        "--lemma",
+        action="append",
+        metavar="LEMMA",
+        help="Only process row(s) with this lemma (repeatable, e.g. --lemma aids)",
+    )
     args = parser.parse_args()
     if args.packs_only:
         args.skip_lexemes = True
         args.skip_senses = True
         args.skip_questions = True
+    if args.pack_items_only:
+        args.skip_questions = True
 
     storage = Path(os.environ.get("VOCAB_STORAGE_DIR", DEFAULT_STORAGE))
     vocab_path = storage / "vocab_full_table.json"
     rows = json.loads(vocab_path.read_text(encoding="utf-8"))
-    logger.info("Loaded {} vocab rows", len(rows))
+    if args.lemma:
+        want = {str(x).strip().lower() for x in args.lemma if str(x).strip()}
+        rows = [
+            r
+            for r in rows
+            if (r.get("lemma") or r.get("display_word") or "").strip().lower() in want
+        ]
+        logger.info("Filtered to {} row(s) for lemma(s) {}", len(rows), sorted(want))
+        if not rows:
+            raise SystemExit(f"No vocab rows for lemma(s): {sorted(want)}")
+    logger.info("Loaded {} vocab rows to process", len(rows))
 
-    conn = psycopg2.connect(_pg_url())
+    conn = _connect_pg()
     conn.autocommit = False
     try:
         if not args.questions_only:
             if not args.skip_lexemes:
                 logger.info("Upserting lexemes…")
                 import_lexemes(conn, rows)
-            if not args.skip_packs:
+            if args.pack_items_only:
+                logger.info("Upserting pack items (selected rows only)…")
+                upsert_pack_items_for_rows(conn, rows)
+            elif not args.skip_packs:
                 logger.info("Rebuilding pack items…")
                 import_packs(conn, rows)
             if not args.skip_senses:

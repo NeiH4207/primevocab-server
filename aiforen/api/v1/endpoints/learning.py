@@ -149,15 +149,6 @@ class VocabMcqIn(BaseModel):
     time_taken: int = 0
 
 
-class VocabSentenceIn(BaseModel):
-    translate_sentence: Optional[str] = None
-    topic_sentence: Optional[str] = None
-    sentence: Optional[str] = None  # back-compat alias for translate_sentence
-    use_ai: bool = False
-    ai_retry: bool = False
-    time_taken: int = 0
-
-
 class VocabCalibrationAnswer(BaseModel):
     word_id: str
     word: str
@@ -421,30 +412,6 @@ async def vocab_mcq_answer(
             free_text_answer=payload.free_text_answer,
             reorder_order=payload.reorder_order,
             pack_id=pack_id,
-            time_taken=payload.time_taken,
-        )
-    )
-
-
-@router.post("/vocab/words/{word_id}/sentence")
-async def vocab_sentence(
-    word_id: str,
-    payload: VocabSentenceIn,
-    user: CurrentUser = Depends(get_current_user),
-    pg: AsyncSession = Depends(get_pg),
-):
-    svc = _learning_svc(pg)
-    translate = payload.translate_sentence or payload.sentence or ""
-    topic = payload.topic_sentence or ""
-    return _wrap(
-        await svc.submit_vocab_sentence(
-            user_id=user.id,
-            plan_code=user.plan_code,
-            word_id=word_id,
-            translate_sentence=translate,
-            topic_sentence=topic,
-            use_ai=payload.use_ai,
-            ai_retry=payload.ai_retry,
             time_taken=payload.time_taken,
         )
     )

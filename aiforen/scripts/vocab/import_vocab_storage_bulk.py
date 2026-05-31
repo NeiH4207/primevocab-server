@@ -294,6 +294,8 @@ def import_questions(conn, storage: Path) -> None:
         "SELECT lexeme_id::text, id::text FROM vocab_senses WHERE sense_order = 1"
     )
     sense_by_lexeme: Dict[str, str] = dict(cur.fetchall())
+    cur.execute("SELECT id::text FROM vocab_senses")
+    valid_sense_ids = {row[0] for row in cur.fetchall()}
 
     quiz_paths = sorted(storage.glob("quiz_*_vocab.json"))
     order = {"A1": 0, "A2": 1, "B1": 2, "B2": 3, "C1": 4, "C2": 5, "IELTS": 6, "GRE": 7}
@@ -317,7 +319,10 @@ def import_questions(conn, storage: Path) -> None:
             if not lemma:
                 continue
             lid = lexeme_id_for(lemma, _normalize_pos(ref.get("pos") or "noun"))
-            sense_id = ref.get("sense_id") or sense_by_lexeme.get(str(lid))
+            raw_sid = (ref.get("sense_id") or "").strip()
+            sense_id = sense_by_lexeme.get(str(lid))
+            if raw_sid and raw_sid in valid_sense_ids:
+                sense_id = raw_sid
             for q in item.get("questions") or []:
                 row = question_row_from_quiz(
                     q,

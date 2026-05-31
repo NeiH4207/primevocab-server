@@ -24,9 +24,12 @@ from aiforen.domain.sql_models import (
     UsageQuota,
     UserLearningDailyRollup,
     UserLearningWeakness,
+    VocabCoachingWorkout,
+    VocabCoachingWorkoutItem,
     VocabDailyMission,
     VocabLegacyWordMap,
     VocabUserPackState,
+    VocabUserSkillState,
     VocabUserWordState,
 )
 
@@ -34,6 +37,15 @@ VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 WEAKNESS_LABELS: Dict[str, str] = {
+    "meaning": "word meaning",
+    "context": "meaning in context",
+    "collocation": "collocation",
+    "pattern": "sentence pattern",
+    "translation": "translation",
+    "usage_correction": "usage correction",
+    "register": "register and tone",
+    "precision": "precision and nuance",
+    "rewrite": "sentence rewrite",
     "meaning_mcq_wrong": "Meaning MCQ",
     "recall_failed": "word recall",
     "translation_failed": "sentence practice",
@@ -110,6 +122,11 @@ class LearningPersonalizationRepo:
         progress: Optional[Dict[str, Any]] = None,
         word: Optional[Dict[str, Any]] = None,
         pack_mastery_pct: Optional[float] = None,
+        workout_id: Optional[str | uuid.UUID] = None,
+        workout_item_id: Optional[str | uuid.UUID] = None,
+        skill_id: Optional[str] = None,
+        mastery_slot: Optional[int] = None,
+        interaction_kind: Optional[str] = None,
     ) -> None:
         uid = _uuid(user_id)
         now = occurred_at or datetime.now(VN_TZ)
@@ -135,6 +152,11 @@ class LearningPersonalizationRepo:
                 answer_meta=answer_meta or {},
                 ai_eval_meta=ai_eval_meta or {},
                 weakness_tags=weakness_tags,
+                workout_id=_uuid(workout_id) if workout_id else None,
+                workout_item_id=_uuid(workout_item_id) if workout_item_id else None,
+                skill_id=skill_id,
+                mastery_slot=mastery_slot,
+                interaction_kind=interaction_kind,
                 occurred_at=now,
             )
             .on_conflict_do_nothing(constraint="uq_learning_event_id")
@@ -434,6 +456,15 @@ class LearningPersonalizationRepo:
     def suggested_repair(dimension: str) -> str:
         return {
             "meaning_mcq_wrong": "Redo meaning MCQs before production practice.",
+            "meaning": "Confirm the meaning, then use the word in a fresh context.",
+            "context": "Practice choosing the correct sense from a real sentence.",
+            "collocation": "Review collocations and produce one natural phrase.",
+            "pattern": "Repeat the target sentence pattern with a short example.",
+            "translation": "Write one clean translation sentence using the target word.",
+            "usage_correction": "Correct one realistic usage error before moving on.",
+            "register": "Compare tone and register in one focused example.",
+            "precision": "Contrast the target with a near-synonym in context.",
+            "rewrite": "Rewrite one sentence naturally with the target word.",
             "translation_failed": "Write one clean translation sentence using the target word.",
             "topic_sentence_failed": "Answer a short IELTS-style topic prompt with the target word.",
             "missing_target_word": "Repeat the sentence task and explicitly include the target word.",
@@ -514,8 +545,19 @@ class LearningPersonalizationRepo:
             cleared[key] = int(result.rowcount or 0)
 
         await _wipe(LearningEvent, "learning_events")
+        workout_ids = select(VocabCoachingWorkout.id).where(
+            VocabCoachingWorkout.user_id == uid
+        )
+        result = await self.s.execute(
+            delete(VocabCoachingWorkoutItem).where(
+                VocabCoachingWorkoutItem.workout_id.in_(workout_ids)
+            )
+        )
+        cleared["vocab_coaching_workout_items"] = int(result.rowcount or 0)
+        await _wipe(VocabCoachingWorkout, "vocab_coaching_workouts")
         await _wipe(VocabUserWordState, "vocab_user_word_state")
         await _wipe(VocabUserPackState, "vocab_user_pack_state")
+        await _wipe(VocabUserSkillState, "vocab_user_skill_state")
         await _wipe(UserLearningDailyRollup, "user_learning_daily_rollups")
         await _wipe(UserLearningWeakness, "user_learning_weaknesses")
         await _wipe(VocabDailyMission, "vocab_daily_missions")

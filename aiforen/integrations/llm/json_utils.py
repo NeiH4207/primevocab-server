@@ -231,7 +231,8 @@ def build_vocab_quiz_eval_prompt(
     )
     rubric_block = f"\nRubric:\n{rubric_lines}\n" if rubric_lines else ""
     return (
-        "You are an IELTS vocabulary coach grading ONE learner production answer.\n"
+        "You are an English vocabulary coach grading ONE learner production answer.\n"
+        "Respect the task's CEFR or exam-track level: reward natural, level-fit usage rather than IELTS-only phrasing.\n"
         f'Task type: "{task_type}"\n'
         f'Target word: "{target_word}"\n'
         f'Instruction shown to learner: "{prompt.strip()}"\n'

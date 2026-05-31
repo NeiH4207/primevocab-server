@@ -571,6 +571,7 @@ from aiforen.domain.vocab_mastery_score import (
     migrate_legacy_word_points,
     word_budget_pct,
 )
+from aiforen.domain.vocab_workout import canonical_skill, mastery_slot_credit_key
 from aiforen.integrations.llm.factory import get_llm_provider
 from aiforen.integrations.llm.json_utils import (
     normalize_vocab_calibration_payload,
@@ -843,6 +844,11 @@ class LearningService:
         ai_eval_meta: Optional[Dict[str, Any]] = None,
         weakness_tags: Optional[List[str]] = None,
         occurred_at: Optional[datetime] = None,
+        workout_id: Optional[str] = None,
+        workout_item_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        mastery_slot: Optional[int] = None,
+        interaction_kind: Optional[str] = None,
     ) -> None:
         try:
             await self.personalization.record_vocab_event(
@@ -859,6 +865,11 @@ class LearningService:
                 ai_eval_meta=ai_eval_meta or {},
                 weakness_tags=weakness_tags or [],
                 occurred_at=occurred_at,
+                workout_id=workout_id,
+                workout_item_id=workout_item_id,
+                skill_id=skill_id,
+                mastery_slot=mastery_slot,
+                interaction_kind=interaction_kind,
                 progress=progress,
                 word=word,
                 pack_mastery_pct=pack_mastery_pct,
@@ -2707,6 +2718,11 @@ class LearningService:
         reorder_order: Optional[List[int]] = None,
         pack_id: Optional[str] = None,
         time_taken: int = 0,
+        workout_id: Optional[str] = None,
+        workout_item_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        mastery_slot: Optional[int] = None,
+        interaction_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         now = datetime.utcnow()
         word = await self._get_vocab_word(word_id, pack_id=pack_id)
@@ -2807,7 +2823,12 @@ class LearningService:
             state["best_streak"] = max(
                 int(state.get("best_streak", 0)), int(state["current_streak"])
             )
-            slot_key = resolved_qid or f"{q_type}:{answer_meta.get('mastery_slot', 0)}"
+            slot_key = mastery_slot_credit_key(
+                track_id=getattr(question_row, "track_id", None),
+                mastery_slot=getattr(question_row, "mastery_slot", None),
+                fallback_question_id=resolved_qid,
+                task_type=q_type,
+            )
             credited_slots = {str(x) for x in (state.get("quiz_slots_credited") or [])}
             if slot_key not in credited_slots:
                 credited_slots.add(slot_key)
@@ -2826,15 +2847,14 @@ class LearningService:
                     len(credited_slots) + (1 if state.get("learn_credited") else 0),
                 )
         else:
-            state["mastery_step"] = 0
-            state["mastery_level"] = "new"
+            # Keep previously credited matrix slots. A wrong answer creates a
+            # targeted repair issue; it must not erase evidence already earned.
+            credited_slots = {str(x) for x in (state.get("quiz_slots_credited") or [])}
+            state["mastery_step"] = min(
+                QUIZ_MATRIX_SLOTS,
+                len(credited_slots) + (1 if state.get("learn_credited") else 0),
+            )
             state["current_streak"] = 0
-            if pack_id:
-                await self._withdraw_word_cycle_points(
-                    user_id=user_id, pack_id=pack_id, state=state
-                )
-            self._clear_vocab_cycle_flags(state)
-            state["quiz_slots_credited"] = []
             state["failed_locked_until"] = self._tomorrow_start()
             state["spaced_repetition"] = {
                 "ease_factor": 2.5,
@@ -2903,8 +2923,13 @@ class LearningService:
                 if ai_feedback
                 else None
             ),
-            weakness_tags=[] if is_correct else [f"{q_type or 'quiz'}_wrong"],
+            weakness_tags=[] if is_correct else [canonical_skill(q_type or "meaning")],
             occurred_at=now,
+            workout_id=workout_id,
+            workout_item_id=workout_item_id,
+            skill_id=skill_id,
+            mastery_slot=mastery_slot,
+            interaction_kind=interaction_kind,
         )
         return {
             "word_id": word_id,

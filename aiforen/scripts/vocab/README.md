@@ -195,24 +195,36 @@ python -m aiforen.scripts.vocab.import_oxford_csv
 - First-time DB: `docker compose run --rm seed`
 - **Never** set `ALLOW_VOCAB_WIPE=1` unless you intend to delete all vocab senses/questions/packs.
 
-## Import from `vocab_storage/` (7563 words + ~48k MCQ)
+## Import from `vocab_storage/` (7563 senses + ~68k quiz slots)
 
 Curated JSON lives in the repo sibling folder `vocab_storage/` (`vocab_full_table.json`, `quiz_*_vocab.json`).
 
+**Recommended local build** (no prod migration scripts; ensures pack rows + quiz matrix columns, then bulk import):
+
 ```bash
-cd primevocab-server
-# Local (Postgres up, env from .env or docker)
-python -m aiforen.scripts.vocab.import_vocab_storage
-
-# Production (Railway DATABASE_PUBLIC_URL)
-export DATABASE_URL="$DATABASE_PUBLIC_URL"
-python -m aiforen.scripts.vocab.import_vocab_storage
-
-# Preview counts only
-python -m aiforen.scripts.vocab.import_vocab_storage --dry-run
+./scripts/build_vocab_from_storage.sh
 ```
 
-This updates lexemes/senses in place (matched by lemma+pos), rebuilds `vocab_pack_items` per pack, and imports MCQ rows into `vocab_questions` (skips rewrite/free-text tasks). Takes several minutes on a full run.
+Manual steps:
+
+```bash
+cd primevocab-server
+export DATABASE_URL=postgresql://aiforen:aiforen_dev@localhost:55432/aiforen
+export VOCAB_STORAGE_DIR=../vocab_storage
+python3 scripts/ensure_vocab_import_schema.py
+docker compose run --rm --no-deps -e DATABASE_URL=postgresql://aiforen:aiforen_dev@postgres:5432/aiforen api \
+  python -m aiforen.scripts.vocab.ensure_vocab_packs
+docker compose run --rm --no-deps -v "$(pwd)/../vocab_storage:/vocab_storage:ro" \
+  -e DATABASE_URL=postgresql://aiforen:aiforen_dev@postgres:5432/aiforen \
+  -e VOCAB_STORAGE_DIR=/vocab_storage api \
+  python -m aiforen.scripts.vocab.import_vocab_storage_bulk
+docker compose run --rm --no-deps -e DATABASE_URL=postgresql://aiforen:aiforen_dev@postgres:5432/aiforen api \
+  python -m aiforen.scripts.vocab.validate_questions
+```
+
+Production: `DATABASE_URL="$DATABASE_PUBLIC_URL"` with the same bulk importer (after DB has `track_id` / workout schema).
+
+This updates lexemes/senses in place (matched by lemma+pos), rebuilds `vocab_pack_items` per pack, and imports all interaction kinds into `vocab_questions`.
 
 ## 3. Docker
 

@@ -14,6 +14,44 @@ QUIZ_TASK_ALIASES: Dict[str, str] = {
 
 ACTIVE_STATUSES = frozenset({"validated", "approved", "generated"})
 
+# Must match production ck_vocab_question_skill (Postgres CHECK).
+ALLOWED_SKILLS = frozenset(
+    {
+        "meaning",
+        "context",
+        "sense",
+        "collocation",
+        "pattern",
+        "grammar_pattern",
+        "usage",
+        "register",
+        "nuance",
+        "paraphrase",
+        "gre",
+        "syntax",
+        "production",
+        "error_correction",
+        "error_diagnosis",
+        "precise_meaning",
+        "semantic_logic",
+        "text_completion",
+        "sentence_equivalence",
+        "verbal_reasoning",
+        "topic_meaning",
+        "academic_collocation",
+        "academic_production",
+        "argument_production",
+        "precision",
+    }
+)
+
+SKILL_ALIASES: Dict[str, str] = {
+    "register_precision": "precision",
+    "precision_cloze": "precision",
+    "controlled_production": "production",
+    "nuance_production": "nuance",
+}
+
 
 def canonical_task_type(raw: str) -> str:
     key = (raw or "").strip()
@@ -32,9 +70,7 @@ def track_id_from_level(level_code: str) -> str:
 
 
 def skill_for_task(task_type: str, raw_skill: Optional[str] = None) -> str:
-    if raw_skill and str(raw_skill).strip():
-        return str(raw_skill).strip()
-    return {
+    from_task = {
         "vn_meaning_mcq": "meaning",
         "meaning_mcq": "meaning",
         "meaning_in_context": "meaning",
@@ -64,6 +100,11 @@ def skill_for_task(task_type: str, raw_skill: Optional[str] = None) -> str:
         "gre_completion": "text_completion",
         "paraphrase": "paraphrase",
     }.get(task_type, "meaning")
+    if raw_skill and str(raw_skill).strip():
+        normalized = SKILL_ALIASES.get(str(raw_skill).strip(), str(raw_skill).strip())
+        if normalized in ALLOWED_SKILLS:
+            return normalized
+    return from_task
 
 
 def map_question_status(raw: Optional[str]) -> str:

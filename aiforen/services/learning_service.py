@@ -53,6 +53,17 @@ from aiforen.domain.vocab_mission_priority import (
     rank_mission_weaknesses,
     reorder_plan_blocks,
 )
+from aiforen.domain.vocab_task_templates import (
+    get_vocab_task_template,
+    word_task_mission_enabled,
+)
+from aiforen.domain.vocab_word_mission import (
+    assign_word_tasks,
+    build_rules_word_mission_payload,
+    build_word_mission_context_extras,
+    expand_word_tasks_to_plan_blocks,
+    session_template_payload,
+)
 
 _MISSION_WEAKNESS_REPAIR_VI: Dict[str, str] = {
     "stale_review_due": "Review các từ cần ôn để giữ recall ổn định.",
@@ -3322,6 +3333,10 @@ class LearningService:
                 ),
             },
         }
+        use_word_tasks = word_task_mission_enabled()
+        if use_word_tasks:
+            context.update(build_word_mission_context_extras(context))
+
         snapshot_hash = hashlib.sha256(
             json.dumps(context, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
@@ -3376,6 +3391,9 @@ class LearningService:
                     "primary_cta": cached_output.get("primary_cta") or {},
                     "coach_overview_lines": cached_output.get("coach_overview_lines")
                     or [],
+                    "session_template": cached_output.get("session_template"),
+                    "word_tasks": cached_output.get("word_tasks") or [],
+                    "selection_rationale": cached_output.get("selection_rationale"),
                 },
                 context=context,
                 mission_date=mission_date,
@@ -3384,11 +3402,12 @@ class LearningService:
             mission.setdefault("generated_at", cached.get("generated_at"))
             if cached_output.get("task_progress_hash"):
                 mission["task_progress_hash"] = cached_output["task_progress_hash"]
-            await self._hydrate_mission_plan_word_ids(
-                user_id=user_id,
-                mission=mission,
-                context=context,
-            )
+            if not use_word_tasks:
+                await self._hydrate_mission_plan_word_ids(
+                    user_id=user_id,
+                    mission=mission,
+                    context=context,
+                )
             return mission
 
         provider_name = "mock"
@@ -3400,17 +3419,24 @@ class LearningService:
             )
             raw = await provider.generate_vocab_daily_mission(context=context)
             mission = normalize_vocab_daily_mission_payload(raw, context=context)
+            if use_word_tasks:
+                mission = await self._build_mission_from_word_tasks(
+                    user_id=user_id,
+                    llm_payload=mission,
+                    context=context,
+                )
             mission = self._finalize_vocab_mission_payload(
                 mission=mission,
                 context=context,
                 mission_date=mission_date,
                 source="llm_generated",
             )
-            await self._hydrate_mission_plan_word_ids(
-                user_id=user_id,
-                mission=mission,
-                context=context,
-            )
+            if not use_word_tasks:
+                await self._hydrate_mission_plan_word_ids(
+                    user_id=user_id,
+                    mission=mission,
+                    context=context,
+                )
             if self.personalization is not None:
                 await self.personalization.upsert_daily_mission(
                     user_id=user_id,
@@ -3439,14 +3465,28 @@ class LearningService:
                 type(exc).__name__,
                 exc,
             )
-            mission = self._fallback_vocab_mission(
-                context=context, mission_date=mission_date
-            )
-            await self._hydrate_mission_plan_word_ids(
-                user_id=user_id,
-                mission=mission,
-                context=context,
-            )
+            if use_word_tasks:
+                rules_payload = build_rules_word_mission_payload(context)
+                mission = await self._build_mission_from_word_tasks(
+                    user_id=user_id,
+                    llm_payload=rules_payload,
+                    context=context,
+                )
+                mission = self._finalize_vocab_mission_payload(
+                    mission=mission,
+                    context=context,
+                    mission_date=mission_date,
+                    source="fallback_rules",
+                )
+            else:
+                mission = self._fallback_vocab_mission(
+                    context=context, mission_date=mission_date
+                )
+                await self._hydrate_mission_plan_word_ids(
+                    user_id=user_id,
+                    mission=mission,
+                    context=context,
+                )
             if self.personalization is not None:
                 await self.personalization.upsert_daily_mission(
                     user_id=user_id,
@@ -3774,6 +3814,103 @@ class LearningService:
         cap = max(1, min(target, 20))
         return pool[:cap]
 
+    async def _build_mission_from_word_tasks(
+        self,
+        *,
+        user_id: str,
+        llm_payload: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Turn LLM word-mission JSON into mission dict with 1-word plan_blocks."""
+        locale = str(context.get("locale") or "vi")
+        candidate_packs = context.get("candidate_packs") or []
+        primary_pack_id = candidate_packs[0].get("pack_id") if candidate_packs else None
+
+        template_id = str(llm_payload.get("session_template_id") or "")
+        template = get_vocab_task_template(template_id)
+        if template is None:
+            from aiforen.domain.vocab_task_templates import (
+                default_template_for_mission_type,
+            )
+
+            mission_type = str(
+                (context.get("mission_signals") or {}).get("primary_mission_type")
+                or "study_pack"
+            )
+            template = default_template_for_mission_type(mission_type)
+
+        recent_actions = context.get("recent_actions") or []
+
+        async def fetch_word_ids(
+            *,
+            pack_id: str,
+            target: int,
+            mode: str,
+            exclude: Set[str],
+        ) -> List[str]:
+            return await self._mission_word_ids_for_pack(
+                user_id=user_id,
+                pack_id=pack_id,
+                target=target,
+                mode=mode,
+                exclude=exclude,
+            )
+
+        async def fetch_wrong_word_ids(target: int) -> List[str]:
+            selected: List[str] = []
+            for action in recent_actions:
+                if action.get("is_correct") is not False:
+                    continue
+                word_id = str(action.get("word_id") or "").strip()
+                if not word_id or word_id in selected:
+                    continue
+                selected.append(word_id)
+                if len(selected) >= target:
+                    break
+            return selected
+
+        word_tasks = await assign_word_tasks(
+            llm_payload=llm_payload,
+            context=context,
+            template=template,
+            pack_id=str(primary_pack_id) if primary_pack_id else None,
+            fetch_word_ids=fetch_word_ids,
+            fetch_wrong_word_ids=fetch_wrong_word_ids,
+        )
+
+        pack_id = str(primary_pack_id) if primary_pack_id else None
+        plan_blocks = expand_word_tasks_to_plan_blocks(
+            word_tasks=word_tasks,
+            template=template,
+            pack_id=pack_id,
+            locale=locale,
+        )
+
+        primary_cta: Dict[str, Any] = {}
+        if plan_blocks:
+            first = plan_blocks[0]
+            primary_cta = {
+                "task_id": first.get("task_id"),
+                "action_type": first.get("type"),
+                "pack_id": first.get("pack_id"),
+                "word_ids": list(first.get("word_ids") or []),
+                "target_count": 1,
+                "task_steps": list(first.get("task_steps") or []),
+                "label": first.get("title") or "",
+            }
+
+        return {
+            "coach_overview_lines": llm_payload.get("coach_overview_lines") or [],
+            "confidence": llm_payload.get("confidence", 0.7),
+            "plan_blocks": plan_blocks,
+            "primary_cta": primary_cta,
+            "session_template": session_template_payload(template, locale),
+            "word_tasks": word_tasks,
+            "selection_rationale": llm_payload.get("selection_rationale"),
+            "headline": "",
+            "summary": "",
+        }
+
     async def _hydrate_mission_plan_word_ids(
         self,
         *,
@@ -3980,7 +4117,7 @@ class LearningService:
                 "evidence_count": int(primary_weakness.get("evidence_count") or 0),
                 "dimension": primary_weakness.get("dimension"),
             }
-        return {
+        result: Dict[str, Any] = {
             "mission_date": mission_date.isoformat(),
             "focus_band": {
                 "band": focus.get("active_band"),
@@ -4013,6 +4150,13 @@ class LearningService:
                 (context.get("user_profile") or {}).get("calibration_completed")
             ),
         }
+        if mission.get("session_template") is not None:
+            result["session_template"] = mission.get("session_template")
+        if mission.get("word_tasks") is not None:
+            result["word_tasks"] = mission.get("word_tasks")
+        if mission.get("selection_rationale"):
+            result["selection_rationale"] = mission.get("selection_rationale")
+        return result
 
     def _fallback_vocab_mission(
         self,

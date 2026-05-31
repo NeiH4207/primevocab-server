@@ -345,7 +345,53 @@ def _vocab_mission_language_rules(locale: str) -> str:
     return "- Write all user-facing text in English.\n"
 
 
+def build_vocab_daily_word_mission_prompt(*, context: Dict[str, Any]) -> str:
+    locale = str(context.get("locale") or "vi")
+    language_rules = _vocab_mission_language_rules(locale)
+    word_range = context.get("word_count_range") or {"min": 3, "max": 8}
+    return (
+        "You are a vocabulary learning coach designing today's word-by-word mission.\n"
+        "Return ONLY valid JSON (no markdown).\n\n"
+        "Important: the backend rule engine generates headline, summary, reason, expected_gain, and CTA.\n"
+        'Do NOT write those. Return headline="", summary="", primary_cta={}.\n\n'
+        "MODEL: One vocabulary word = one task. All tasks today share ONE session_template_id "
+        "(same task_steps and difficulty style).\n\n"
+        "Your job:\n"
+        "1. Read task_template_catalog — pick exactly one session_template_id that fits "
+        "weaknesses, due_today, learner_rhythm, and band.\n"
+        "2. Write selection_rationale (2–4 short sentences: why this template and word count).\n"
+        "3. Set target_word_count within word_count_range (integer).\n"
+        "4. List word_tasks: prioritize recent wrong answers, then due, then new words. "
+        "No duplicate words. word_id optional if unknown (backend fills from pool).\n"
+        "5. Write 2–3 coach_overview_lines (max 95 chars each).\n"
+        "6. Return confidence.\n\n"
+        "WORD_TASKS:\n"
+        "- source: wrong_answer | due | new | pool | calibration\n"
+        "- priority: 1 = do first\n"
+        "- lemma_hint: English lemma when word_id unknown\n"
+        "- note: optional 1 line for coach (not shown as block title)\n\n"
+        "CONFIDENCE: base 0.70; +0.10 if top weakness evidence_count>=3; "
+        '+0.10 if learner_rhythm is "consistent"; clamp 0.45–0.92.\n\n'
+        "Schema:\n"
+        "{\n"
+        '  "coach_overview_lines": ["...", "..."],\n'
+        '  "session_template_id": "<from catalog>",\n'
+        '  "selection_rationale": "...",\n'
+        f'  "target_word_count": {word_range.get("min", 5)},\n'
+        '  "word_tasks": [{"word_id":"","lemma_hint":"","source":"wrong_answer","priority":1,"note":""}],\n'
+        '  "confidence": 0.7,\n'
+        '  "headline": "",\n'
+        '  "summary": "",\n'
+        '  "primary_cta": {}\n'
+        "}\n"
+        f"{language_rules}\n"
+        f"Context JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n"
+    )
+
+
 def build_vocab_daily_mission_prompt(*, context: Dict[str, Any]) -> str:
+    if context.get("word_task_mission"):
+        return build_vocab_daily_word_mission_prompt(context=context)
     locale = str(context.get("locale") or "vi")
     language_rules = _vocab_mission_language_rules(locale)
     return (
@@ -466,6 +512,13 @@ def normalize_vocab_daily_mission_payload(
     *,
     context: Dict[str, Any],
 ) -> Dict[str, Any]:
+    if context.get("word_task_mission"):
+        from aiforen.domain.vocab_word_mission import (
+            normalize_vocab_daily_word_mission_payload,
+        )
+
+        return normalize_vocab_daily_word_mission_payload(payload, context=context)
+
     candidate_packs = context.get("candidate_packs") or []
     allowed_packs = {str(p.get("pack_id")) for p in candidate_packs if p.get("pack_id")}
     raw_blocks = payload.get("plan_blocks") or []

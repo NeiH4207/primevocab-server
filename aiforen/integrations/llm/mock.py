@@ -195,6 +195,38 @@ class MockLLMProvider(LLMProvider):
         *,
         context: Dict[str, Any],
     ) -> Dict[str, Any]:
+        if context.get("word_task_mission"):
+            from aiforen.domain.vocab_learner_rhythm import build_coach_overview_lines
+            from aiforen.domain.vocab_word_mission import (
+                build_rules_word_mission_payload,
+            )
+
+            locale = str(context.get("locale") or "vi").lower()
+            rhythm = str(context.get("learner_rhythm") or "early")
+            activity = context.get("activity") or {}
+            weaknesses = context.get("weaknesses") or []
+            top_weakness = weaknesses[0] if weaknesses else None
+            payload = build_rules_word_mission_payload(context)
+            if not payload.get("coach_overview_lines"):
+                payload["coach_overview_lines"] = build_coach_overview_lines(
+                    rhythm=rhythm,  # type: ignore[arg-type]
+                    locale=locale,
+                    streak=int(activity.get("streak_days") or 0),
+                    active_days_14=int(activity.get("active_days_14") or 0),
+                    total_progress_words=int(
+                        (context.get("stats") or {}).get("total_progress_words") or 0
+                    ),
+                    learned_today=int(
+                        (context.get("stats") or {}).get("learned_today") or 0
+                    ),
+                    due_today=int((context.get("stats") or {}).get("due_today") or 0),
+                    primary_weakness_label=(
+                        top_weakness.get("label") if top_weakness else None
+                    ),
+                )
+            payload["confidence"] = 0.74
+            return payload
+
         profile = context.get("user_profile") or {}
         focus_signals = context.get("focus_signals") or {}
         mission_signals = context.get("mission_signals") or {}

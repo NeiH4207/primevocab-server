@@ -6,7 +6,7 @@ name: Deploy API (production)
 
 on:
   push:
-    branches: [main]
+    branches: [main, release-main]
   workflow_dispatch:
 
 concurrency:

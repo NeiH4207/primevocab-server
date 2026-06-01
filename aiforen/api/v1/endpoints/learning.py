@@ -434,6 +434,7 @@ async def vocab_session(
     pack_id: str = Query(...),
     limit: int = 5,
     word_ids: list[str] | None = Query(None),
+    random_any: bool = Query(False),
     user: CurrentUser = Depends(get_current_user),
     pg: AsyncSession = Depends(get_pg),
 ):
@@ -444,6 +445,7 @@ async def vocab_session(
             pack_id=pack_id,
             limit=limit,
             word_ids=word_ids,
+            random_any=random_any,
         )
     )
 

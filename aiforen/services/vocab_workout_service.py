@@ -56,6 +56,11 @@ def _quiz_step(candidate: Dict[str, Any]) -> Dict[str, Any]:
         "explanation": candidate.get("explanation"),
         "payload": candidate.get("payload") or {},
     }
+    payload = step["payload"]
+    if isinstance(payload, dict):
+        ctx = str(payload.get("context") or "").strip()
+        if ctx:
+            step["context"] = ctx
     if interaction == "mcq":
         step["mcq"] = {
             "question": candidate.get("prompt") or "",

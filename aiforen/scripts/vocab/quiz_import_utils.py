@@ -132,11 +132,12 @@ def wire_options(options: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], s
 
 
 def question_prompt(q: Dict[str, Any]) -> str:
+    """Question text only; context is stored separately in payload for the UI."""
     prompt = (q.get("prompt") or "").strip()
+    if prompt:
+        return prompt
     context = (q.get("context") or "").strip()
-    if context and context not in prompt:
-        return f"{prompt}\n\n{context}" if prompt else context
-    return prompt or "Choose the best answer."
+    return context or "Choose the best answer."
 
 
 def question_row_from_quiz(

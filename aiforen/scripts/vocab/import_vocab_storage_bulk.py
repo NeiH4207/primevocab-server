@@ -127,16 +127,31 @@ def import_lexemes(conn, rows: List[Dict[str, Any]]) -> None:
 
 def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
     cur = conn.cursor()
+    order_by_lexeme: Dict[uuid.UUID, int] = {}
     updated = 0
     for i in range(0, len(rows), BATCH):
         chunk = rows[i : i + BATCH]
-        params = []
-        sense_ins = []
+        params: List[Tuple[Any, ...]] = []
+        sense_ins: List[Tuple[str, str, int, str, Any]] = []
         for row in chunk:
             lid = _lid(row)
             tips = row.get("tips") if isinstance(row.get("tips"), list) else []
             syns = row.get("synonyms") if isinstance(row.get("synonyms"), list) else []
             def_en = (row.get("definition_en") or row.get("lemma") or "")[:8000]
+            raw_sid = (row.get("sense_id") or "").strip()
+            try:
+                sense_id = str(uuid.UUID(raw_sid)) if raw_sid else str(uuid.uuid4())
+            except ValueError:
+                sense_id = str(uuid.uuid4())
+            raw_order = row.get("sense_order")
+            if raw_order is not None:
+                sense_order = max(1, int(raw_order))
+            else:
+                order_by_lexeme[lid] = order_by_lexeme.get(lid, 0) + 1
+                sense_order = order_by_lexeme[lid]
+            sense_ins.append(
+                (sense_id, str(lid), sense_order, def_en, row.get("vi_gloss"))
+            )
             params.append(
                 (
                     def_en,
@@ -149,18 +164,22 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
                     [row.get("pack_id") or "general"],
                     json.dumps(tips),
                     json.dumps(syns),
-                    str(lid),
+                    sense_id,
                 )
             )
-            sense_ins.append((str(uuid.uuid4()), str(lid), def_en, row.get("vi_gloss")))
         psycopg2.extras.execute_batch(
             cur,
             """
             INSERT INTO vocab_senses (
               id, lexeme_id, sense_order, definition_en, vi_gloss,
               created_at, updated_at
-            ) VALUES (%s::uuid, %s::uuid, 1, %s, %s, NOW(), NOW())
-            ON CONFLICT ON CONSTRAINT uq_vocab_sense_order DO NOTHING
+            ) VALUES (%s::uuid, %s::uuid, %s, %s, %s, NOW(), NOW())
+            ON CONFLICT (id) DO UPDATE SET
+              lexeme_id = EXCLUDED.lexeme_id,
+              sense_order = EXCLUDED.sense_order,
+              definition_en = EXCLUDED.definition_en,
+              vi_gloss = COALESCE(EXCLUDED.vi_gloss, vocab_senses.vi_gloss),
+              updated_at = NOW()
             """,
             sense_ins,
         )
@@ -179,7 +198,7 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
               tips = %s::jsonb,
               synonyms = %s::jsonb,
               updated_at = NOW()
-            WHERE lexeme_id = %s::uuid AND sense_order = 1
+            WHERE id = %s::uuid
             """,
             params,
         )

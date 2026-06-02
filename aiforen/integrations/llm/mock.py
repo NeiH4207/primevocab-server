@@ -498,9 +498,10 @@ class MockLLMProvider(LLMProvider):
     ) -> Dict[str, Any]:
         from .json_utils import normalize_vocab_quiz_ai_feedback
 
-        _ = (task_type, prompt, context, source_sentence, rubric, accepted_flexibility)
+        _ = (prompt, context, source_sentence, rubric, accepted_flexibility)
         s = learner_answer.strip()
         word = target_word.lower()
+        max_score = int((ai_scoring or {}).get("max_score") or 5)
         if not s:
             status = "fail"
             score = 0
@@ -515,10 +516,42 @@ class MockLLMProvider(LLMProvider):
             given_norm = s.lower()
             if model_norm and (model_norm == given_norm or model_norm in given_norm):
                 status = "ok"
-                score = 5
+                score = max_score
             else:
                 status = "ok"
-                score = 4
+                score = max(4, max_score - 1)
+
+        corrected = s
+        score_explanation = ""
+        score_breakdown: list[dict[str, Any]] = []
+        recommendation = ""
+        if score >= max_score:
+            recommendation = f"Good use of '{target_word}'."
+        elif score >= 4:
+            corrected = model_answer.strip() or s
+            score_explanation = (
+                f"You earned {score}/{max_score}: meaning is mostly right, "
+                f"but wording is not as natural as a strong answer."
+            )
+            recommendation = (
+                f"Your phrase «{s[:80]}» is understandable but awkward. "
+                f"Try «{corrected[:80]}» because it matches the prompt more naturally."
+            )
+            score_breakdown = [
+                {
+                    "criterion": "meaning",
+                    "points": max_score - 1,
+                    "note": "Core meaning is clear.",
+                },
+                {
+                    "criterion": "naturalness",
+                    "points": score,
+                    "note": "Word order or collocation could be smoother.",
+                },
+            ]
+        else:
+            recommendation = f"Rewrite using '{target_word}' naturally for this prompt."
+
         return normalize_vocab_quiz_ai_feedback(
             {
                 "status": status,
@@ -527,15 +560,14 @@ class MockLLMProvider(LLMProvider):
                 or score >= int((ai_scoring or {}).get("pass_score") or 4),
                 "uses_target_word": word in s.lower(),
                 "answers_task": len(s.split()) >= 3,
-                "corrected_sentence": s,
-                "recommendation": (
-                    f"Good use of '{target_word}'."
-                    if status == "ok"
-                    else f"Rewrite using '{target_word}' naturally for this prompt."
-                ),
+                "corrected_sentence": corrected,
+                "recommendation": recommendation,
+                "score_explanation": score_explanation,
+                "score_breakdown": score_breakdown,
             },
             learner_answer=learner_answer,
             model_answer=model_answer,
+            task_type=task_type,
             ai_scoring=ai_scoring,
         )
 

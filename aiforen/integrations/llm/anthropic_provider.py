@@ -180,6 +180,7 @@ class AnthropicLLMProvider(LLMProvider):
             payload,
             learner_answer=learner_answer,
             model_answer=model_answer,
+            task_type=task_type,
             ai_scoring=ai_scoring,
         )
 

@@ -97,6 +97,29 @@ _GENERIC_RECOMMENDATION_MARKERS = (
     "practice more",
 )
 
+_QUIZ_GENERIC_RECOMMENDATION_MARKERS = _GENERIC_RECOMMENDATION_MARKERS + (
+    "gần được",
+    "gần đúng",
+    "almost there",
+    "close enough",
+    "not bad",
+    "keep going",
+)
+
+_QUIZ_SCORE_CRITERIA_DEFAULT = (
+    "meaning",
+    "target_word",
+    "grammar",
+    "naturalness",
+)
+
+_QUIZ_SCORE_CRITERIA_TRANSLATE_HINTS = (
+    "meaning",
+    "target_word",
+    "grammar",
+    "naturalness",
+)
+
 
 def _clamp_corrected_sentence(corrected: str, original: str) -> str:
     original = (original or "").strip()
@@ -123,6 +146,85 @@ def _sanitize_recommendation(text: str) -> str:
     ):
         return ""
     return cleaned
+
+
+def _sanitize_quiz_recommendation(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    lowered = cleaned.lower()
+    if any(marker in lowered for marker in _QUIZ_GENERIC_RECOMMENDATION_MARKERS):
+        if len(lowered) < 64:
+            return ""
+    if len(lowered) < 12:
+        return cleaned
+    return cleaned
+
+
+def _quiz_score_criteria(task_type: str) -> tuple[str, ...]:
+    tt = (task_type or "").strip().lower()
+    if tt in ("translate", "translate_with_hints"):
+        return _QUIZ_SCORE_CRITERIA_TRANSLATE_HINTS
+    return _QUIZ_SCORE_CRITERIA_DEFAULT
+
+
+def _normalize_score_breakdown(
+    raw: Any,
+    *,
+    max_score: int,
+    criteria: tuple[str, ...],
+) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw[:6]:
+        if not isinstance(item, dict):
+            continue
+        criterion = str(item.get("criterion") or "").strip()[:48]
+        note = str(item.get("note") or "").strip()[:280]
+        if not criterion or not note:
+            continue
+        try:
+            points = int(item.get("points", 0))
+        except (TypeError, ValueError):
+            points = 0
+        points = max(0, min(max_score, points))
+        out.append({"criterion": criterion, "points": points, "note": note})
+    if out:
+        return out
+    return []
+
+
+def _synthesize_vocab_quiz_score_fallback(
+    *,
+    learner_answer: str,
+    corrected_sentence: str,
+    model_answer: str,
+    score: int,
+    max_score: int,
+) -> tuple[str, str]:
+    learner = (learner_answer or "").strip()
+    corrected = (corrected_sentence or "").strip()
+    model = (model_answer or "").strip()
+    if corrected and learner and corrected.lower() != learner.lower():
+        explanation = f"Bạn được {score}/{max_score} điểm vì câu cần chỉnh nhẹ so với bản bạn viết."
+        recommendation = (
+            f"Cụm trong câu của bạn chưa khớp hoàn toàn. "
+            f"Thử: «{corrected}»" + (f" — gần với «{model}»." if model else ".")
+        )
+        return explanation, recommendation
+    if model and learner and model.lower() != learner.lower():
+        explanation = f"Bạn được {score}/{max_score} điểm; câu đúng hướng nhưng chưa đạt mức tối đa."
+        recommendation = (
+            f"Câu của bạn: «{learner[:120]}». "
+            f"Tham khảo: «{model[:120]}» — chỉnh lại cho tự nhiên và đúng nghĩa đề."
+        )
+        return explanation, recommendation
+    explanation = (
+        f"Bạn được {score}/{max_score} điểm; còn thiếu một phần nhỏ để đạt điểm tối đa."
+    )
+    recommendation = "Rà lại nghĩa đề, từ mục tiêu, ngữ pháp và cách diễn đạt tự nhiên."
+    return explanation, recommendation
 
 
 def _norm_eval_entry(node: Dict[str, Any], fallback_sentence: str) -> Dict[str, Any]:
@@ -230,6 +332,8 @@ def build_vocab_quiz_eval_prompt(
         else ""
     )
     rubric_block = f"\nRubric:\n{rubric_lines}\n" if rubric_lines else ""
+    criteria = _quiz_score_criteria(task_type)
+    criteria_line = ", ".join(criteria)
     return (
         "You are an English vocabulary coach grading ONE learner production answer.\n"
         "Respect the task's CEFR or exam-track level: reward natural, level-fit usage rather than IELTS-only phrasing.\n"
@@ -249,8 +353,17 @@ def build_vocab_quiz_eval_prompt(
         "- Do NOT require exact wording match with the reference answer.\n"
         "- status: ok = pass, needs_fix = minor issues but mostly correct, fail = wrong/missing target/off-task.\n"
         f"- score: integer 0..{max_score}; passed: true when score >= {pass_score}.\n"
-        "- corrected_sentence: minimal edit; if ok, return learner answer unchanged.\n"
-        "- recommendation: max 2 sentences, specific, coach-like (Vietnamese OK in recommendation).\n\n"
+        "- corrected_sentence: minimal edit; if fully correct, return learner answer unchanged.\n"
+        "- When score == max_score: recommendation may be brief praise (1 sentence).\n"
+        f"- When score < {max_score}: recommendation MUST explain exactly why points were lost — "
+        "quote the learner's exact phrase, name the issue (meaning / target word / grammar / naturalness), "
+        "and suggest a fix. Pattern: Your phrase 'X' is [issue]. Try 'Y' because [reason]. "
+        "Vietnamese is OK in recommendation and score_explanation.\n"
+        f"- score_explanation: 1-3 sentences summarizing why the score is not {max_score} "
+        "(required when score < max_score; empty when score == max_score).\n"
+        f"- score_breakdown: optional array (max 4 items) when score < {max_score}; each item "
+        f'{{"criterion": "<one of: {criteria_line}>", "points": <0..{max_score}>, "note": "why this dimension lost points"}}. '
+        "Points are partial credit for that dimension, not a sum that must equal score.\n\n"
         "Return ONLY strict JSON:\n"
         "{\n"
         '  "status": "ok|needs_fix|fail",\n'
@@ -259,7 +372,9 @@ def build_vocab_quiz_eval_prompt(
         '  "uses_target_word": true,\n'
         '  "answers_task": true,\n'
         '  "corrected_sentence": "...",\n'
-        '  "recommendation": "..."\n'
+        '  "recommendation": "...",\n'
+        '  "score_explanation": "...",\n'
+        '  "score_breakdown": [{"criterion":"meaning","points":1,"note":"..."}]\n'
         "}\n"
     )
 
@@ -269,6 +384,7 @@ def normalize_vocab_quiz_ai_feedback(
     *,
     learner_answer: str,
     model_answer: str,
+    task_type: str = "",
     ai_scoring: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     scoring = ai_scoring or {}
@@ -312,22 +428,62 @@ def normalize_vocab_quiz_ai_feedback(
     if not passed and raw_status == "ok" and score < pass_score:
         raw_status = "needs_fix"
 
-    return {
+    corrected_sentence = _clamp_corrected_sentence(
+        str(payload.get("corrected_sentence", learner_answer)),
+        learner_answer,
+    )
+    recommendation = _sanitize_quiz_recommendation(
+        str(payload.get("recommendation", ""))
+    )
+    score_explanation = str(payload.get("score_explanation") or "").strip()[:400]
+    resolved_task_type = str(task_type or payload.get("task_type") or "")
+    score_breakdown = _normalize_score_breakdown(
+        payload.get("score_breakdown"),
+        max_score=max_score,
+        criteria=_quiz_score_criteria(resolved_task_type),
+    )
+
+    if score < max_score:
+        if not score_explanation and recommendation:
+            score_explanation = recommendation[:400]
+        if not recommendation or (
+            len(recommendation) < 64
+            and any(
+                marker in recommendation.lower()
+                for marker in _QUIZ_GENERIC_RECOMMENDATION_MARKERS
+            )
+        ):
+            fb_explanation, fb_recommendation = _synthesize_vocab_quiz_score_fallback(
+                learner_answer=learner_answer,
+                corrected_sentence=corrected_sentence,
+                model_answer=model_answer,
+                score=score,
+                max_score=max_score,
+            )
+            if not score_explanation:
+                score_explanation = fb_explanation
+            if not recommendation:
+                recommendation = fb_recommendation
+    else:
+        score_explanation = ""
+        score_breakdown = []
+
+    result: Dict[str, Any] = {
         "ai_status": "ok",
         "passed": passed,
         "score": score,
         "max_score": max_score,
         "pass_score": pass_score,
         "status": raw_status,
-        "recommendation": _sanitize_recommendation(
-            str(payload.get("recommendation", ""))
-        ),
-        "corrected_sentence": _clamp_corrected_sentence(
-            str(payload.get("corrected_sentence", learner_answer)),
-            learner_answer,
-        ),
+        "recommendation": recommendation,
+        "corrected_sentence": corrected_sentence,
         "model_answer": model_answer,
     }
+    if score_explanation:
+        result["score_explanation"] = score_explanation
+    if score_breakdown:
+        result["score_breakdown"] = score_breakdown
+    return result
 
 
 def _vocab_mission_language_rules(locale: str) -> str:

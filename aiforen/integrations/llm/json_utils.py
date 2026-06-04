@@ -1279,6 +1279,10 @@ READING_HELPER_NOTE_JSON_SCHEMA = """
   "trigger_event_ids": ["event id from recent actions"],
   "title": "short learner-facing title",
   "target": {"text": "exact text from passage/action", "word": "optional word", "paragraph_index": 1},
+  "meaning_in_context": {"plain": "what it means in this exact sentence", "why": "why that sense fits here", "not_this": "common meaning that does NOT fit here"},
+  "substitutes": [{"word": "near synonym/substitute", "fits": true, "reason": "why it can/cannot replace the target here"}],
+  "grammar": {"pattern": "grammar/collocation frame", "role": "grammatical role in this sentence", "note": "word form, preposition, modifier, or clause structure that matters"},
+  "collocation": {"chunk": "natural chunk from the passage", "pattern": "reusable frame"},
   "diagnosis": "what the learner action reveals, grounded in context",
   "guide": "specific explanation or coaching guide",
   "concrete_step": "one next action the learner can do now",
@@ -1320,7 +1324,15 @@ def build_reading_helper_note_prompt(*, context: Dict[str, Any]) -> str:
         "- NEVER invent lookups, highlights, translations, wrong answers, or evidence.\n"
         "- Choose card_type from the action: lookup/translate → vocab_context; long selection/explain → phrase_breakdown; connectors/scope/cause/contrast → logic_bridge; highlight before question → evidence_hint; wrong answer → question_repair.\n"
         "- target.text and evidence.quote must be exact text from the passage/action when possible.\n"
-        "- diagnosis says what the learner action suggests; guide explains the context; concrete_step tells exactly what to do next.\n"
+        "- For vocab_context keep the card COMPACT (max ~4 learner-facing lines):\n"
+        "  * title: short (e.g. Từ trong câu này). Do NOT repeat card_type as a heading.\n"
+        "  * meaning_in_context.plain: chunk = sense in THIS sentence (e.g. irrigation systems = hệ thống tưới tiêu).\n"
+        "  * NEVER wrap words in « » or >>; write plain text only.\n"
+        "  * NEVER say the word must be understood as the same chunk twice (no circular templates).\n"
+        "  * Omit substitutes, grammar, collocation, vocab[], diagnosis, guide, concrete_step unless they add real value.\n"
+        "  * substitutes only when you list real English words (not placeholders like near equivalent).\n"
+        "- For phrase_breakdown: meaning + one concrete_step + mini_check; avoid duplicate sections.\n"
+        "- concrete_step must be specific. Do NOT say reread the sentence, practice more, or simplify the phrase.\n"
         "- If locale is Vietnamese, keep learner-facing fields Vietnamese but preserve English passage quotes/words.\n"
         "- For wrong answers, guide evidence recovery; do not reveal a new answer unless the learner already answered.\n"
         "- should_show=false only if recent actions are empty, repeated noise, or too weak.\n\n"
@@ -1334,6 +1346,19 @@ def build_reading_helper_note_prompt(*, context: Dict[str, Any]) -> str:
         "Return ONLY valid JSON matching this schema (no markdown):\n"
         f"{READING_HELPER_NOTE_JSON_SCHEMA}\n"
     )
+
+
+def _strip_coach_guillemets(value: str) -> str:
+    return (value or "").replace("«", "").replace("»", "").strip()
+
+
+_PLACEHOLDER_SUBSTITUTE_WORDS = {
+    "near equivalent",
+    "near synonym",
+    "substitute",
+    "...",
+    "…",
+}
 
 
 def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
@@ -1418,24 +1443,129 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
             }
         )
 
-    diagnosis = (
+    meaning_raw = (
+        raw.get("meaning_in_context")
+        if isinstance(raw.get("meaning_in_context"), dict)
+        else (
+            raw.get("meaningInContext")
+            if isinstance(raw.get("meaningInContext"), dict)
+            else {}
+        )
+    )
+    meaning_in_context = {
+        "plain": _strip_coach_guillemets(
+            str(
+                meaning_raw.get("plain")
+                or raw.get("meaningInContext")
+                or raw.get("meaning_in_context")
+                or ""
+            )
+        )[:360],
+        "why": _strip_coach_guillemets(
+            str(meaning_raw.get("why") or meaning_raw.get("reason") or "")
+        )[:360],
+        "not_this": _strip_coach_guillemets(
+            str(
+                meaning_raw.get("not_this")
+                or meaning_raw.get("notThis")
+                or meaning_raw.get("not_this_meaning")
+                or ""
+            )
+        )[:280],
+    }
+    meaning_in_context = {
+        k: v for k, v in meaning_in_context.items() if v not in ("", None)
+    }
+
+    substitutes_out: List[Dict[str, Any]] = []
+    raw_substitutes = (
+        raw.get("substitutes") or raw.get("synonyms") or raw.get("replace_with")
+    )
+    if isinstance(raw_substitutes, list):
+        for item in raw_substitutes[:5]:
+            if isinstance(item, dict):
+                word = str(
+                    item.get("word")
+                    or item.get("phrase")
+                    or item.get("substitute")
+                    or ""
+                ).strip()
+                reason = str(
+                    item.get("reason") or item.get("why") or item.get("note") or ""
+                ).strip()
+                fits_raw = item.get("fits")
+                fits = bool(fits_raw) if isinstance(fits_raw, bool) else None
+            else:
+                word = str(item or "").strip()
+                reason = ""
+                fits = None
+            if not word or word.lower() in _PLACEHOLDER_SUBSTITUTE_WORDS:
+                continue
+            substitutes_out.append(
+                {
+                    "word": word[:80],
+                    **({"fits": fits} if fits is not None else {}),
+                    **(
+                        {"reason": _strip_coach_guillemets(reason)[:260]}
+                        if reason
+                        else {}
+                    ),
+                }
+            )
+
+    grammar_raw = raw.get("grammar") if isinstance(raw.get("grammar"), dict) else {}
+    grammar_out = {
+        "pattern": str(
+            grammar_raw.get("pattern")
+            or grammar_raw.get("structure")
+            or raw.get("grammar_pattern")
+            or ""
+        ).strip()[:260],
+        "role": str(grammar_raw.get("role") or raw.get("grammar_role") or "").strip()[
+            :260
+        ],
+        "note": str(
+            grammar_raw.get("note")
+            or grammar_raw.get("explanation")
+            or raw.get("grammar_note")
+            or ""
+        ).strip()[:360],
+    }
+    grammar_out = {k: v for k, v in grammar_out.items() if v not in ("", None)}
+
+    collocation_raw = (
+        raw.get("collocation") if isinstance(raw.get("collocation"), dict) else {}
+    )
+    collocation_out = {
+        "chunk": str(
+            collocation_raw.get("chunk")
+            or raw.get("collocation_chunk")
+            or target_text
+            or ""
+        ).strip()[:220],
+        "pattern": str(
+            collocation_raw.get("pattern") or raw.get("collocation_pattern") or ""
+        ).strip()[:260],
+    }
+    collocation_out = {k: v for k, v in collocation_out.items() if v not in ("", None)}
+
+    diagnosis = _strip_coach_guillemets(
         _field("diagnosis", limit=420)
         or _field("whyVi", "why_vi", "whyEn", "why_en", limit=420)
-        or _field("meaningInContext", "meaning_in_context", limit=280)
         or ""
     )
-    guide = (
+    guide = _strip_coach_guillemets(
         _field("guide", limit=520)
         or _field("readingTip", "reading_tip", "strategyTip", "strategy_tip", limit=320)
         or _field("meaningGloss", "meaning_gloss", limit=220)
         or ""
     )
-    concrete_step = (
-        _field("concrete_step", "concreteStep", limit=260)
-        or _field("miniCheck", "mini_check", limit=200)
-        or ""
+    concrete_step = _strip_coach_guillemets(
+        _field("concrete_step", "concreteStep", limit=260) or ""
     )
-    mini_check = _field("mini_check", "miniCheck", limit=220)
+    mini_check = _strip_coach_guillemets(
+        _field("mini_check", "miniCheck", limit=220) or ""
+    )
 
     evidence = raw.get("evidence")
     evidence_out: Dict[str, Any] = {}
@@ -1493,7 +1623,7 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
         for x in (raw.get("trigger_event_ids") or raw.get("triggerEventIds") or [])
         if str(x).strip()
     ][:6]
-    title = _field("title", limit=90) or {
+    title = _strip_coach_guillemets(_field("title", limit=90) or "") or {
         "vocab_context": "Word in context",
         "phrase_breakdown": "Phrase breakdown",
         "logic_bridge": "Sentence logic",
@@ -1501,6 +1631,52 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
         "question_repair": "Repair the question",
         "progress_reflection": "Reading pattern",
     }.get(card_type, "Reading coach")
+
+    if card_type == "vocab_context":
+        if meaning_in_context.get("plain"):
+            diagnosis = ""
+            guide = ""
+            concrete_step = ""
+        generic_vocab_meanings = {
+            "nghĩa theo câu này",
+            "nghĩa theo ngữ cảnh",
+            "meaning in context",
+        }
+        vocab_out = [
+            row
+            for row in vocab_out
+            if not (
+                target_word
+                and row.get("word", "").lower() == target_word.lower()
+                and row.get("meaning", "").lower() in generic_vocab_meanings
+            )
+        ]
+        chunk = collocation_out.get("chunk") or target_text
+        if (
+            grammar_out.get("pattern")
+            and chunk
+            and grammar_out["pattern"].lower() == chunk.lower()
+        ):
+            grammar_out = {
+                k: v for k, v in grammar_out.items() if k not in ("pattern",)
+            }
+        if (
+            collocation_out.get("chunk")
+            and collocation_out.get("chunk", "").lower() == (target_word or "").lower()
+        ):
+            collocation_out = {
+                k: v for k, v in collocation_out.items() if k not in ("chunk",)
+            }
+
+    has_teaching_content = bool(
+        diagnosis
+        or guide
+        or concrete_step
+        or meaning_in_context
+        or substitutes_out
+        or grammar_out
+        or collocation_out
+    )
     return {
         "id": str(raw.get("id") or "").strip()[:96],
         "card_type": card_type,
@@ -1516,6 +1692,10 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
                 else {}
             ),
         },
+        "meaning_in_context": meaning_in_context,
+        "substitutes": substitutes_out,
+        "grammar": grammar_out,
+        "collocation": collocation_out,
         "diagnosis": diagnosis,
         "guide": guide,
         "concrete_step": concrete_step,
@@ -1523,14 +1703,24 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
         "vocab": vocab_out[:6],
         "evidence": evidence_out,
         "display": {"tone": tone, "icon": icon},
-        "should_show": bool(should_show) and bool(diagnosis or guide or concrete_step),
+        "should_show": bool(should_show) and has_teaching_content,
         "reason_for_showing": str(
             raw.get("reason_for_showing") or raw.get("reasonForShowing") or ""
         ).strip()[:220],
         # Legacy fields kept for older clients during rollout.
         "noteType": legacy_type_map.get(card_type, card_type),
         "shouldShow": bool(should_show),
-        "keyPoints": [x for x in (diagnosis, guide, concrete_step) if x][:3],
+        "keyPoints": [
+            x
+            for x in (
+                meaning_in_context.get("plain") if meaning_in_context else "",
+                grammar_out.get("note") if grammar_out else "",
+                diagnosis,
+                guide,
+                concrete_step,
+            )
+            if x
+        ][:3],
     }
 
 
@@ -1727,20 +1917,41 @@ def mock_reading_helper_note(*, context: Dict[str, Any]) -> Dict[str, Any]:
 
     if word and event_type in ("word_click", "word_lookup", "lookup", "translate"):
         chunk = key_chunk or phrase or word
+        chunk_label = chunk if chunk.lower() != word.lower() else word
+        plain = (
+            f"{chunk_label} = nghĩa trong câu này (đọc cả cụm quanh {word}, không dịch một mình)."
+            if chunk_label != word
+            else f"{word} = đoán nghĩa trong câu, rồi đọc 2–3 từ trước/sau để khớp với đoạn."
+        )
         return normalize_reading_helper_note_payload(
             {
                 "card_type": "vocab_context",
                 "priority": 4,
                 "trigger_event_ids": trigger_ids,
-                "title": "Từ trong ngữ cảnh",
-                "target": {"text": wider_phrase or chunk, "word": word},
-                "diagnosis": f"Bạn đang kiểm tra «{word}», nên nghĩa cần gắn với cụm «{chunk}» trong câu.",
-                "guide": f"Đừng học «{word}» như một mục từ rời; đọc cả cụm «{chunk}» để lấy nghĩa đúng.",
-                "concrete_step": "Đọc lại nguyên câu một lần và thay cụm này bằng cách diễn đạt đơn giản hơn.",
-                "mini_check": f"«{chunk}» đang bổ nghĩa hoặc giải thích ý nào?",
-                "vocab": [
-                    {"word": word, "meaning": "nghĩa theo câu này", "in_context": chunk}
-                ],
+                "title": "Từ trong câu này",
+                "target": {
+                    "word": word,
+                    **(
+                        {"text": wider_phrase[:160]}
+                        if wider_phrase and wider_phrase.lower() != word.lower()
+                        else {}
+                    ),
+                },
+                "meaning_in_context": {"plain": plain},
+                "substitutes": [],
+                "grammar": {},
+                "collocation": (
+                    {"chunk": chunk} if chunk.lower() != word.lower() else {}
+                ),
+                "diagnosis": "",
+                "guide": "",
+                "concrete_step": "",
+                "mini_check": (
+                    f"Bạn đoán {chunk_label} nghĩa gì trong câu này?"
+                    if chunk_label
+                    else None
+                ),
+                "vocab": [],
                 "display": {"tone": "normal", "icon": "word"},
                 "should_show": True,
                 "reason_for_showing": "word interaction with context chunk",

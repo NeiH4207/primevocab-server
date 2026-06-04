@@ -138,10 +138,24 @@ class VocabWorkoutService:
             raise ValueError("Workout not found")
         return await self.serialize(workout, user_id=user_id)
 
+    async def skip(self, *, user_id: str, workout_id: str) -> Dict[str, Any]:
+        workout = await self.repo.get(user_id=user_id, workout_id=workout_id)
+        if workout is None:
+            raise ValueError("Workout not found")
+        await self.repo.mark_skipped(workout)
+        await self.personalization.record_vocab_event(
+            user_id=user_id,
+            event_type="workout_skipped",
+            workout_id=workout.id,
+        )
+        return await self.serialize(workout, user_id=user_id)
+
     async def start(self, *, user_id: str, workout_id: str) -> Dict[str, Any]:
         workout = await self.repo.get(user_id=user_id, workout_id=workout_id)
         if workout is None:
             raise ValueError("Workout not found")
+        if workout.status == "skipped":
+            raise ValueError("This workout was skipped for today")
         await self.repo.mark_started(workout)
         await self.personalization.record_vocab_event(
             user_id=user_id,

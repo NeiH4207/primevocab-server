@@ -146,6 +146,23 @@ class VocabWorkoutRepo:
             workout.started_at = datetime.now(timezone.utc)
         if workout.status == "ready":
             workout.status = "in_progress"
+
+    async def mark_skipped(self, workout: VocabCoachingWorkout) -> None:
+        if workout.status in ("completed", "skipped"):
+            return
+        now = datetime.now(timezone.utc)
+        workout.status = "skipped"
+        workout.completed_at = workout.completed_at or now
+        if workout.started_at is None:
+            workout.started_at = now
+        workout.summary = {
+            **(workout.summary or {}),
+            "skipped": True,
+            "skill_gain": workout.focus_skill,
+            "correct": int((workout.progress or {}).get("correct") or 0),
+            "total": int((workout.progress or {}).get("total") or 0),
+        }
+        await self.s.flush()
         await self.s.flush()
 
     async def complete_item(

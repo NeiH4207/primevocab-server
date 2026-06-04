@@ -13,7 +13,12 @@ import random
 from typing import Any, AsyncIterator, Dict, List
 
 from .base import EvaluationStreamEvent, LLMProvider
-from .json_utils import normalize_vocab_eval_payload
+from .json_utils import (
+    normalize_coaching_notes_payload,
+    normalize_reading_explain_payload,
+    normalize_reading_questions_payload,
+    normalize_vocab_eval_payload,
+)
 
 _CRITERIA_ORDER = [
     ("task_achievement", "Task Achievement"),
@@ -189,6 +194,117 @@ class MockLLMProvider(LLMProvider):
                 },
             ],
         }
+
+    async def explain_reading_phrase(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        phrase = str(context.get("phrase") or "").strip()
+        sentence = str(context.get("sentence") or "").strip()
+        level = str(context.get("level") or "B1")
+        head = phrase.split()[0] if phrase.split() else phrase
+        return normalize_reading_explain_payload(
+            {
+                "explanation": (
+                    f'"{phrase}" works as one idea here. In the sentence "{sentence}", '
+                    f"it links the key word to the writer's point rather than standing alone. "
+                    f"At {level}, try saying it in your own words first."
+                ),
+                "paraphrase": f"in other words: {phrase.lower()}",
+                "vocab_notes": [f"Focus word: {head}"] if head else [],
+            },
+            phrase=phrase,
+            sentence=sentence,
+            level=level,
+        )
+
+    async def generate_reading_questions(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        count = int(context.get("count") or 4)
+        words: List[str] = []
+        for key in ("looked_up_words", "bolded_words", "difficult_words"):
+            for item in context.get(key) or []:
+                token = item.get("word") if isinstance(item, dict) else item
+                token = str(token or "").strip()
+                if token and token not in words:
+                    words.append(token)
+        questions: List[Dict[str, Any]] = []
+        for word in words[:count]:
+            questions.append(
+                {
+                    "type": "vocabulary",
+                    "prompt": f'Which option best matches how "{word}" is used in the passage?',
+                    "options": [
+                        f"the intended meaning of {word} in context",
+                        f"an unrelated meaning of {word}",
+                        f"the opposite of {word}",
+                    ],
+                    "correct_option": f"the intended meaning of {word} in context",
+                    "explanation": (
+                        f'Re-read the sentence around "{word}" and match the meaning to context.'
+                    ),
+                    "source_word": word,
+                }
+            )
+        while len(questions) < count:
+            questions.append(
+                {
+                    "type": "comprehension",
+                    "prompt": "What is the main idea of the passage?",
+                    "options": [
+                        "It explains the topic and gives supporting detail",
+                        "It tells a personal story with no facts",
+                        "It lists unrelated opinions",
+                    ],
+                    "correct_option": "It explains the topic and gives supporting detail",
+                    "explanation": "The passage develops one topic with concrete supporting detail.",
+                    "source_word": "",
+                }
+            )
+        return normalize_reading_questions_payload(
+            {"questions": questions},
+            count=count,
+            fallback_questions=context.get("fallback_questions"),
+        )
+
+    async def generate_coaching_notes(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        level = str(context.get("level") or "B1")
+        looked_up = [str(w) for w in (context.get("looked_up_words") or [])][:8]
+        reading_correct = int(context.get("reading_correct") or 0)
+        reading_total = int(context.get("reading_total") or 0)
+        notes = [
+            f"Anchor level: {level}. Keep most new words near this band until recall is stable.",
+            (
+                f"Revisit looked-up words tomorrow: {', '.join(looked_up[:6])}."
+                if looked_up
+                else "No lookup-heavy word today; keep the normal daily mix."
+            ),
+            (
+                f"Reading: {reading_correct}/{reading_total} correct — "
+                + (
+                    "add easier context questions next time."
+                    if reading_total and reading_correct / max(1, reading_total) < 0.7
+                    else "ready for a slightly denser passage."
+                )
+            ),
+        ]
+        return normalize_coaching_notes_payload(
+            {
+                "headline": f"Day {context.get('day_number') or 1}: steady {level} progress",
+                "notes": notes,
+                "next_focus": "Blend recall of today's words with a denser reading passage.",
+                "recommended_words": looked_up,
+            },
+            context=context,
+        )
 
     async def generate_vocab_daily_mission(
         self,

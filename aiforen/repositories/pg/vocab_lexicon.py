@@ -586,6 +586,14 @@ class VocabLexiconRepo:
         track_questions = self._questions_for_track(
             lexeme, track, sense_id=sense.id if sense else None
         )
+        if not track_questions:
+            track_questions = self._active_questions(lexeme)
+            if sense is not None:
+                track_questions = [
+                    q
+                    for q in track_questions
+                    if q.sense_id is None or q.sense_id == sense.id
+                ]
         quiz_steps = [self._question_to_quiz_step(q) for q in track_questions]
         question = self._pick_question(
             lexeme, mastery_step=mastery_step, sense_id=sense_id

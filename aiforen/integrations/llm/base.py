@@ -81,3 +81,21 @@ class LLMProvider(Protocol):
         *,
         context: Dict[str, Any],
     ) -> Dict[str, Any]: ...
+
+    async def explain_reading_phrase(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]: ...
+
+    async def generate_reading_questions(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]: ...
+
+    async def generate_coaching_notes(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]: ...

@@ -374,6 +374,20 @@ async def answer_vocab_workout_item(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/vocab/workouts/{workout_id}/skip")
+async def skip_vocab_workout(
+    workout_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _wrap(
+            await _workout_svc(pg).skip(user_id=user.id, workout_id=workout_id)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/vocab/workouts/{workout_id}/bonus")
 async def start_vocab_workout_bonus(
     workout_id: str,

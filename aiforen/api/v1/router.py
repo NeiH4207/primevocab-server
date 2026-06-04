@@ -13,6 +13,7 @@ from .endpoints import (
     login_as,
     payments,
     users,
+    vocab_coaching,
     writing,
 )
 
@@ -25,6 +26,11 @@ api_router.include_router(auth.legacy_router, tags=["🔐 Auth"])
 api_router.include_router(login_as.router, tags=["🔐 Auth"])
 api_router.include_router(writing.router, prefix="/writing", tags=["✍️ Writing"])
 api_router.include_router(learning.router, prefix="/learning", tags=["📚 Learning"])
+api_router.include_router(
+    vocab_coaching.router,
+    prefix="/learning/vocab-coaching",
+    tags=["🎯 Vocab Coaching"],
+)
 api_router.include_router(payments.router, prefix="/payment", tags=["💳 Payments"])
 api_router.include_router(admin.router, prefix="/admin", tags=["🛡️ Admin"])
 api_router.include_router(

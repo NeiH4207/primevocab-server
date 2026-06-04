@@ -1016,3 +1016,899 @@ def normalize_vocab_calibration_payload(
         "weak_spots": weak_spots,
         "recommended_plan": normalized_plan,
     }
+
+
+# ---------------------------------------------------------------------------
+# Vocab Coaching: phrase explanation, reading questions, coaching notes
+# ---------------------------------------------------------------------------
+
+_COACHING_QUESTION_TYPES = {"comprehension", "vocabulary", "context", "inference"}
+
+
+def build_reading_explain_prompt(*, context: Dict[str, Any]) -> str:
+    return (
+        "You are an IELTS reading coach. A learner selected a phrase inside a passage and "
+        "wants a short, concrete explanation that connects the phrase's vocabulary to the "
+        "wider meaning of the sentence.\n\n"
+        f"Learner CEFR level: {context.get('level') or 'B1'}\n"
+        f"Selected phrase: {json.dumps(context.get('phrase') or '', ensure_ascii=False)}\n"
+        f"Sentence: {json.dumps(context.get('sentence') or '', ensure_ascii=False)}\n"
+        f"Paragraph context: {json.dumps((context.get('paragraph') or '')[:1800], ensure_ascii=False)}\n"
+        f"Passage title: {json.dumps(context.get('title') or '', ensure_ascii=False)}\n\n"
+        f"Grouped reading behaviour: {json.dumps(context.get('action_summary') or {}, ensure_ascii=False)}\n\n"
+        "Constraints:\n"
+        "- explanation max 280 chars, plain and encouraging, no jargon\n"
+        "- paraphrase max 160 chars: rewrite the phrase in simpler English\n"
+        "- vocab_notes: 1-3 short items (max 80 chars each) on key words/collocations\n\n"
+        "Return ONLY strict JSON:\n"
+        "{\n"
+        '  "explanation": "string",\n'
+        '  "paraphrase": "string",\n'
+        '  "vocab_notes": ["string"]\n'
+        "}\n"
+    )
+
+
+def normalize_reading_explain_payload(
+    payload: Dict[str, Any],
+    *,
+    phrase: str,
+    sentence: str,
+    level: str,
+) -> Dict[str, Any]:
+    explanation = _clamp_text(
+        payload.get("explanation"),
+        max_chars=320,
+        fallback=(
+            f'At {level} level, read "{phrase}" inside its sentence: "{sentence}". '
+            "Notice which word carries the main idea, then paraphrase it in simpler English."
+        ),
+    )
+    paraphrase = _clamp_text(payload.get("paraphrase"), max_chars=180, fallback="")
+    notes = _clean_str_list(
+        payload.get("vocab_notes"), max_items=3, max_chars=80, fallback=[]
+    )
+    return {
+        "explanation": explanation,
+        "paraphrase": paraphrase,
+        "vocab_notes": notes,
+    }
+
+
+def build_reading_questions_prompt(*, context: Dict[str, Any]) -> str:
+    return (
+        "You are an IELTS reading examiner. Generate targeted multiple-choice questions for a "
+        "learner based on a passage AND the learner's own reading behaviour (the words they "
+        "looked up, phrases they highlighted, words they bolded, and any wrong answers). "
+        "Prioritise the vocabulary and ideas the learner interacted with — these reveal what "
+        "they need to learn.\n\n"
+        f"Learner CEFR level: {context.get('level') or 'B1'}\n"
+        f"Passage title: {json.dumps(context.get('title') or '', ensure_ascii=False)}\n"
+        f"Passage excerpt: {json.dumps((context.get('passage') or '')[:2400], ensure_ascii=False)}\n"
+        f"Looked-up words: {json.dumps(context.get('looked_up_words') or [], ensure_ascii=False)}\n"
+        f"Translated phrases: {json.dumps(context.get('translated_phrases') or [], ensure_ascii=False)}\n"
+        f"Selected phrases: {json.dumps(context.get('selected_phrases') or [], ensure_ascii=False)}\n"
+        f"Highlighted phrases: {json.dumps(context.get('highlighted_phrases') or [], ensure_ascii=False)}\n"
+        f"Explained phrases: {json.dumps(context.get('explained_phrases') or [], ensure_ascii=False)}\n"
+        f"Bolded words: {json.dumps(context.get('bolded_words') or [], ensure_ascii=False)}\n"
+        f"Difficult/over-band words: {json.dumps(context.get('difficult_words') or [], ensure_ascii=False)}\n"
+        f"Previous wrong answers: {json.dumps(context.get('wrong_answers') or [], ensure_ascii=False)}\n\n"
+        f"Grouped reading behaviour: {json.dumps(context.get('action_summary') or {}, ensure_ascii=False)}\n\n"
+        f"Generate exactly {int(context.get('count') or 4)} questions.\n"
+        "Each question: type in [comprehension, vocabulary, context, inference]; 3-4 options; "
+        "exactly one correct option text that is also present in options; a short explanation; "
+        "and source_word when the question targets a specific word.\n\n"
+        "Return ONLY strict JSON:\n"
+        "{\n"
+        '  "questions": [\n'
+        '    {"type":"vocabulary","prompt":"string","options":["a","b","c"],'
+        '"correct_option":"a","explanation":"string","source_word":"string"}\n'
+        "  ]\n"
+        "}\n"
+    )
+
+
+def normalize_reading_questions_payload(
+    payload: Dict[str, Any],
+    *,
+    count: int,
+    fallback_questions: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    raw = payload.get("questions")
+    rows = raw if isinstance(raw, list) else []
+    out: List[Dict[str, Any]] = []
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            continue
+        prompt = str(item.get("prompt") or "").strip()
+        options = [
+            str(opt).strip() for opt in (item.get("options") or []) if str(opt).strip()
+        ][:4]
+        correct = str(item.get("correct_option") or "").strip()
+        if not prompt or len(options) < 2:
+            continue
+        if correct not in options:
+            correct = options[0]
+        qtype = str(item.get("type") or "comprehension").strip().lower()
+        if qtype not in _COACHING_QUESTION_TYPES:
+            qtype = "comprehension"
+        out.append(
+            {
+                "id": f"aiq-{index + 1}",
+                "type": qtype,
+                "prompt": prompt[:240],
+                "options": options,
+                "correct_option": correct,
+                "explanation": str(item.get("explanation") or "").strip()[:240],
+                "source_word": str(item.get("source_word") or "").strip()[:64] or None,
+                "generated": True,
+            }
+        )
+        if len(out) >= count:
+            break
+    if not out and fallback_questions:
+        return {"questions": list(fallback_questions)[:count]}
+    return {"questions": out}
+
+
+def build_coaching_notes_prompt(*, context: Dict[str, Any]) -> str:
+    locale = str(context.get("locale") or "en")
+    vi = locale.lower().startswith("vi")
+    language_rules = (
+        "Language: Vietnamese-first, friendly coach tone; keep IELTS/CEFR/Band in English.\n"
+        if vi
+        else "Language: English, friendly coach tone.\n"
+    )
+    return (
+        "You are an adaptive vocabulary coach. Summarise the learner's day and design the "
+        "focus for tomorrow using their captured actions and scores. Be specific and "
+        "actionable; reference the actual words and behaviours.\n\n"
+        f"Learner CEFR level: {context.get('level') or 'B1'}\n"
+        f"Day number: {context.get('day_number') or 1}\n"
+        f"Reading score: {context.get('reading_correct') or 0}/{context.get('reading_total') or 0}\n"
+        f"Recall score: {context.get('recall_correct') or 0}/{context.get('recall_total') or 0}\n"
+        f"Looked-up words: {json.dumps(context.get('looked_up_words') or [], ensure_ascii=False)}\n"
+        f"Translated phrases: {json.dumps(context.get('translated_phrases') or [], ensure_ascii=False)}\n"
+        f"Selected phrases: {json.dumps(context.get('selected_phrases') or [], ensure_ascii=False)}\n"
+        f"Highlighted phrases: {json.dumps(context.get('highlighted_phrases') or [], ensure_ascii=False)}\n"
+        f"Explained phrases: {json.dumps(context.get('explained_phrases') or [], ensure_ascii=False)}\n"
+        f"Bolded words: {json.dumps(context.get('bolded_words') or [], ensure_ascii=False)}\n"
+        f"Wrong answers: {json.dumps(context.get('wrong_answers') or [], ensure_ascii=False)}\n\n"
+        f"Grouped reading behaviour: {json.dumps(context.get('action_summary') or {}, ensure_ascii=False)}\n\n"
+        f"{language_rules}"
+        "Constraints: headline max 60 chars; 3-5 notes max 140 chars each; next_focus max 140; "
+        "recommended_words up to 8 lemmas the learner should revisit tomorrow.\n\n"
+        "Return ONLY strict JSON:\n"
+        "{\n"
+        '  "headline": "string",\n'
+        '  "notes": ["string"],\n'
+        '  "next_focus": "string",\n'
+        '  "recommended_words": ["string"]\n'
+        "}\n"
+    )
+
+
+def normalize_coaching_notes_payload(
+    payload: Dict[str, Any],
+    *,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    level = str(context.get("level") or "B1")
+    looked_up = [str(w) for w in (context.get("looked_up_words") or [])][:8]
+    headline = _clamp_text(
+        payload.get("headline"),
+        max_chars=80,
+        fallback=f"Day {context.get('day_number') or 1}: keep your {level} momentum",
+    )
+    notes = _clean_str_list(
+        payload.get("notes"),
+        max_items=5,
+        max_chars=160,
+        fallback=[
+            f"Anchor level: {level}. Keep most new words near this level until recall is stable.",
+            (
+                f"Revisit looked-up words tomorrow: {', '.join(looked_up[:6])}."
+                if looked_up
+                else "No lookup-heavy word yet; keep the normal daily mix."
+            ),
+        ],
+    )
+    next_focus = _clamp_text(
+        payload.get("next_focus"),
+        max_chars=160,
+        fallback="Tomorrow blends recall of today's words with a slightly denser reading.",
+    )
+    recommended = _clean_str_list(
+        payload.get("recommended_words"),
+        max_items=8,
+        max_chars=48,
+        fallback=looked_up,
+    )
+    return {
+        "headline": headline,
+        "notes": notes,
+        "next_focus": next_focus,
+        "recommended_words": recommended,
+    }
+
+
+def build_reading_helper_prompt(*, context: Dict[str, Any]) -> str:
+    """Plain-text markdown streamed to the AI Helper — grounded in recent actions only."""
+    locale = str(context.get("locale") or "en").lower()
+    vi = locale.startswith("vi")
+    language = (
+        "Write entirely in Vietnamese. Keep IELTS, CEFR, and band labels in English when needed."
+        if vi
+        else "Write in clear English suitable for an IELTS learner."
+    )
+    recent = context.get("recent_actions") or []
+    has_actions = bool(recent)
+    return (
+        "You are a live reading coach. The learner is reading an IELTS-style passage. "
+        "Respond ONLY to what appears in Recent learner actions (newest last). "
+        "Never invent lookups, highlights, bold marks, or translations the learner did not do.\n\n"
+        f"{language}\n"
+        "Tone: direct and helpful, like a tutor beside them — not meta commentary. "
+        "Do NOT use words like tip, tips, mẹo, advice, gợi ý, suggestion, or describe "
+        "what the app is doing.\n\n"
+        f"Learner CEFR level: {context.get('level') or 'B1'}\n"
+        f"Passage title: {json.dumps(context.get('title') or '', ensure_ascii=False)}\n"
+        f"Current paragraph: {json.dumps((context.get('paragraph') or '')[:1600], ensure_ascii=False)}\n"
+        f"Recent learner actions (chronological, focus on the last 1-3): "
+        f"{json.dumps(recent, ensure_ascii=False)}\n\n"
+        "If the learner translated text, include the meaning and how it fits the sentence. "
+        "If they looked up a word, explain sense in this paragraph. "
+        "If they highlighted a phrase, unpack that phrase only.\n\n"
+        "Output markdown only. Use exactly these headers (2-3 short bullets each):\n"
+        "### Vocabulary focus\n"
+        "### Meaning in context\n"
+        "### Reading this paragraph\n"
+        + (
+            "If Recent learner actions is empty, give only a brief neutral read of this "
+            "paragraph's main idea and one over-band word to watch — do not claim any learner action.\n"
+            if not has_actions
+            else "Prioritise the latest action; older actions are background only.\n"
+        )
+    )
+
+
+READING_HELPER_NOTE_JSON_SCHEMA = """
+{
+  "card_type": "vocab_context|phrase_breakdown|logic_bridge|evidence_hint|question_repair|reading_strategy|progress_reflection",
+  "priority": 1,
+  "trigger_event_ids": ["event id from recent actions"],
+  "title": "short learner-facing title",
+  "target": {"text": "exact text from passage/action", "word": "optional word", "paragraph_index": 1},
+  "diagnosis": "what the learner action reveals, grounded in context",
+  "guide": "specific explanation or coaching guide",
+  "concrete_step": "one next action the learner can do now",
+  "mini_check": "one short check question",
+  "vocab": [{"word": "...", "meaning": "...", "in_context": "..."}],
+  "evidence": {"quote": "exact quote from passage", "paragraph_index": 1, "why_it_matters": "..."},
+  "display": {"tone": "quiet|normal|urgent", "icon": "word|phrase|logic|evidence|repair|strategy"},
+  "should_show": true
+}
+"""
+
+
+def build_reading_helper_note_prompt(*, context: Dict[str, Any]) -> str:
+    """Structured JSON live coach card — behavior-driven, not chatbot."""
+    locale = str(context.get("locale") or "en").lower()
+    vi = locale.startswith("vi")
+    language = (
+        "All learner-facing strings (meaningGloss, meaningInContext, notThisMeaning, whyVi, "
+        "readingTip, miniCheck, vocab.meaningVi) must be in Vietnamese. "
+        "Keep English only for targetWord, targetText, and chunks."
+        if vi
+        else "Write learner-facing strings in clear English."
+    )
+    paragraphs = context.get("paragraphs") or []
+    para_block = "\n".join(
+        f"[{p.get('index')}] {p.get('text', '')[:900]}"
+        for p in paragraphs
+        if isinstance(p, dict)
+    )
+    reading_state = context.get("reading_state") or {}
+    action_summary = context.get("action_summary") or {}
+    recent = context.get("recent_actions") or []
+    return (
+        "You are an IELTS Reading Coach sitting beside the learner (not a chatbot).\n"
+        "Generate ONE compact coach card from real user actions only.\n\n"
+        f"{language}\n\n"
+        "Principles:\n"
+        "- NEVER generic study tips; every sentence must refer to the selected word, selected phrase, highlighted evidence, question, or visible passage.\n"
+        "- NEVER invent lookups, highlights, translations, wrong answers, or evidence.\n"
+        "- Choose card_type from the action: lookup/translate → vocab_context; long selection/explain → phrase_breakdown; connectors/scope/cause/contrast → logic_bridge; highlight before question → evidence_hint; wrong answer → question_repair.\n"
+        "- target.text and evidence.quote must be exact text from the passage/action when possible.\n"
+        "- diagnosis says what the learner action suggests; guide explains the context; concrete_step tells exactly what to do next.\n"
+        "- If locale is Vietnamese, keep learner-facing fields Vietnamese but preserve English passage quotes/words.\n"
+        "- For wrong answers, guide evidence recovery; do not reveal a new answer unless the learner already answered.\n"
+        "- should_show=false only if recent actions are empty, repeated noise, or too weak.\n\n"
+        f"Learner CEFR: {context.get('level') or 'B1'}\n"
+        f"Passage title: {json.dumps(context.get('title') or '', ensure_ascii=False)}\n"
+        f"Visible paragraph indexes: {context.get('visible_paragraph_indexes')}\n"
+        f"Reading state (rule-based): {json.dumps(reading_state, ensure_ascii=False)}\n\n"
+        f"Action summary: {json.dumps(action_summary, ensure_ascii=False)}\n\n"
+        f"Paragraphs:\n{para_block}\n\n"
+        f"Recent user actions (chronological): {json.dumps(recent, ensure_ascii=False)}\n\n"
+        "Return ONLY valid JSON matching this schema (no markdown):\n"
+        f"{READING_HELPER_NOTE_JSON_SCHEMA}\n"
+    )
+
+
+def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("helper note must be an object")
+    allowed_types = {
+        "vocab_context",
+        "phrase_breakdown",
+        "logic_bridge",
+        "evidence_hint",
+        "question_repair",
+        "reading_strategy",
+        "progress_reflection",
+    }
+    legacy_type_map = {
+        "vocabulary_note": "vocab_context",
+        "sentence_breakdown": "phrase_breakdown",
+        "logic_note": "logic_bridge",
+        "paragraph_main_idea": "reading_strategy",
+        "question_hint": "evidence_hint",
+        "answer_explanation": "question_repair",
+    }
+
+    def _field(*keys: str, limit: int = 600) -> Optional[str]:
+        for key in keys:
+            val = str(raw.get(key) or "").strip()
+            if val:
+                return val[:limit]
+        return None
+
+    raw_type = str(
+        raw.get("card_type")
+        or raw.get("cardType")
+        or raw.get("noteType")
+        or raw.get("note_type")
+        or "reading_strategy"
+    ).strip()
+    card_type = legacy_type_map.get(raw_type, raw_type)
+    if card_type not in allowed_types:
+        card_type = "reading_strategy"
+
+    target_raw = raw.get("target") if isinstance(raw.get("target"), dict) else {}
+    target_text = (
+        str(target_raw.get("text") or "").strip()
+        or _field("targetText", "target_text", limit=400)
+        or _field("phrase", limit=400)
+        or ""
+    )
+    target_word = (
+        str(target_raw.get("word") or "").strip()
+        or _field("targetWord", "target_word", limit=64)
+        or ""
+    )
+    paragraph_index = target_raw.get("paragraph_index")
+    if paragraph_index is None:
+        paragraph_index = target_raw.get("paragraphIndex")
+    if not isinstance(paragraph_index, int):
+        paragraph_index = None
+
+    vocab_out: List[Dict[str, str]] = []
+    for row in raw.get("vocab") or []:
+        if not isinstance(row, dict):
+            continue
+        word = str(row.get("word") or "").strip()
+        meaning = str(
+            row.get("meaning") or row.get("meaningVi") or row.get("meaning_vi") or ""
+        ).strip()
+        in_context = str(
+            row.get("in_context")
+            or row.get("inContext")
+            or row.get("chunk")
+            or row.get("note")
+            or ""
+        ).strip()
+        if not word or not meaning:
+            continue
+        vocab_out.append(
+            {
+                "word": word[:64],
+                "meaning": meaning[:220],
+                "in_context": in_context[:260],
+            }
+        )
+
+    diagnosis = (
+        _field("diagnosis", limit=420)
+        or _field("whyVi", "why_vi", "whyEn", "why_en", limit=420)
+        or _field("meaningInContext", "meaning_in_context", limit=280)
+        or ""
+    )
+    guide = (
+        _field("guide", limit=520)
+        or _field("readingTip", "reading_tip", "strategyTip", "strategy_tip", limit=320)
+        or _field("meaningGloss", "meaning_gloss", limit=220)
+        or ""
+    )
+    concrete_step = (
+        _field("concrete_step", "concreteStep", limit=260)
+        or _field("miniCheck", "mini_check", limit=200)
+        or ""
+    )
+    mini_check = _field("mini_check", "miniCheck", limit=220)
+
+    evidence = raw.get("evidence")
+    evidence_out: Dict[str, Any] = {}
+    if isinstance(evidence, dict):
+        lp = (
+            evidence.get("paragraph_index")
+            or evidence.get("paragraphIndex")
+            or evidence.get("likelyParagraph")
+            or evidence.get("likely_paragraph")
+        )
+        evidence_out = {
+            "quote": str(
+                evidence.get("quote")
+                or evidence.get("questionFocus")
+                or evidence.get("question_focus")
+                or ""
+            ).strip()[:400],
+            "why_it_matters": str(
+                evidence.get("why_it_matters")
+                or evidence.get("whyItMatters")
+                or evidence.get("hintVi")
+                or evidence.get("hint_vi")
+                or ""
+            ).strip()[:300],
+        }
+        if isinstance(lp, int):
+            evidence_out["paragraph_index"] = lp
+        evidence_out = {k: v for k, v in evidence_out.items() if v not in ("", None)}
+
+    display_raw = raw.get("display") if isinstance(raw.get("display"), dict) else {}
+    icon = str(display_raw.get("icon") or "").strip()
+    if icon not in {"word", "phrase", "logic", "evidence", "repair", "strategy"}:
+        icon = {
+            "vocab_context": "word",
+            "phrase_breakdown": "phrase",
+            "logic_bridge": "logic",
+            "evidence_hint": "evidence",
+            "question_repair": "repair",
+        }.get(card_type, "strategy")
+    tone = str(display_raw.get("tone") or "").strip()
+    if tone not in {"quiet", "normal", "urgent"}:
+        tone = "urgent" if card_type == "question_repair" else "normal"
+
+    priority = raw.get("priority")
+    try:
+        priority_int = int(priority) if priority is not None else 3
+    except (TypeError, ValueError):
+        priority_int = 3
+    priority_int = max(1, min(5, priority_int))
+    should_show = raw.get("shouldShow")
+    if should_show is None:
+        should_show = raw.get("should_show", True)
+    trigger_ids = [
+        str(x).strip()[:96]
+        for x in (raw.get("trigger_event_ids") or raw.get("triggerEventIds") or [])
+        if str(x).strip()
+    ][:6]
+    title = _field("title", limit=90) or {
+        "vocab_context": "Word in context",
+        "phrase_breakdown": "Phrase breakdown",
+        "logic_bridge": "Sentence logic",
+        "evidence_hint": "Evidence check",
+        "question_repair": "Repair the question",
+        "progress_reflection": "Reading pattern",
+    }.get(card_type, "Reading coach")
+    return {
+        "id": str(raw.get("id") or "").strip()[:96],
+        "card_type": card_type,
+        "priority": priority_int,
+        "trigger_event_ids": trigger_ids,
+        "title": title,
+        "target": {
+            **({"text": target_text[:400]} if target_text else {}),
+            **({"word": target_word[:64]} if target_word else {}),
+            **(
+                {"paragraph_index": paragraph_index}
+                if paragraph_index is not None
+                else {}
+            ),
+        },
+        "diagnosis": diagnosis,
+        "guide": guide,
+        "concrete_step": concrete_step,
+        "mini_check": mini_check,
+        "vocab": vocab_out[:6],
+        "evidence": evidence_out,
+        "display": {"tone": tone, "icon": icon},
+        "should_show": bool(should_show) and bool(diagnosis or guide or concrete_step),
+        "reason_for_showing": str(
+            raw.get("reason_for_showing") or raw.get("reasonForShowing") or ""
+        ).strip()[:220],
+        # Legacy fields kept for older clients during rollout.
+        "noteType": legacy_type_map.get(card_type, card_type),
+        "shouldShow": bool(should_show),
+        "keyPoints": [x for x in (diagnosis, guide, concrete_step) if x][:3],
+    }
+
+
+_READING_LOGIC_MARKERS = (
+    "although",
+    "however",
+    "therefore",
+    "while",
+    "whereas",
+    "nevertheless",
+)
+_PREP_FOR_CHUNK = {
+    "to",
+    "of",
+    "in",
+    "on",
+    "at",
+    "for",
+    "from",
+    "with",
+    "into",
+    "by",
+    "as",
+}
+
+
+def _norm_reading_token(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def _sentence_word_tokens(sentence: str) -> List[str]:
+    return re.findall(r"[\w'-]+", sentence or "")
+
+
+def _extract_word_chunk(sentence: str, word: str) -> tuple[str, str]:
+    """Return (key_chunk, wider_phrase) around the clicked word."""
+    tokens = _sentence_word_tokens(sentence)
+    needle = _norm_reading_token(word)
+    idx = next(
+        (i for i, t in enumerate(tokens) if _norm_reading_token(t) == needle), -1
+    )
+    if idx < 0:
+        return word, word
+
+    end_idx = idx
+    while end_idx + 1 < len(tokens) and end_idx - idx < 2:
+        nxt = tokens[end_idx + 1]
+        if nxt[:1].isupper() or "-" in nxt or end_idx == idx:
+            end_idx += 1
+        else:
+            break
+
+    start_idx = idx
+    if start_idx > 0 and _norm_reading_token(tokens[start_idx - 1]) in _PREP_FOR_CHUNK:
+        start_idx -= 1
+        if start_idx > 0 and _norm_reading_token(tokens[start_idx - 1]).endswith(
+            ("ed", "ing")
+        ):
+            start_idx -= 1
+
+    key_chunk = " ".join(tokens[idx : end_idx + 1])
+    phrase = " ".join(tokens[start_idx : end_idx + 1])
+    return key_chunk, phrase
+
+
+def _last_word_action(recent: List[Dict[str, Any]]) -> Dict[str, Any]:
+    for action in reversed(recent):
+        if action.get("word"):
+            return action
+    return {}
+
+
+def _clean_target_phrase(*, phrase: str, sentence: str, word: str) -> str:
+    clean = " ".join((phrase or "").split())
+    wnorm = _norm_reading_token(word)
+    if clean and clean.lower().count(wnorm) <= 1 and len(clean.split()) <= 8:
+        return clean[:160]
+    if sentence and word:
+        _, wider = _extract_word_chunk(sentence, word)
+        return wider[:160]
+    return clean[:160] if clean else word
+
+
+def mock_reading_helper_note(*, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Generic structured card when LLM is unavailable; never hard-code sample words."""
+    recent = context.get("recent_actions") or []
+    reading_state = context.get("reading_state") or {}
+    if not recent:
+        return normalize_reading_helper_note_payload(
+            {
+                "card_type": "reading_strategy",
+                "priority": 1,
+                "title": "Reading Coach",
+                "diagnosis": "",
+                "guide": "",
+                "concrete_step": "",
+                "should_show": False,
+                "reason_for_showing": "no recent actions",
+            }
+        )
+
+    difficulty = str(reading_state.get("likelyDifficulty") or "unknown")
+    last = recent[-1] if isinstance(recent[-1], dict) else {}
+    last_word = _last_word_action(recent)
+    word = str(last.get("word") or last_word.get("word") or "").strip()
+    sentence = str(last.get("sentence") or last_word.get("sentence") or "").strip()
+    phrase = _clean_target_phrase(
+        phrase=str(last.get("phrase") or last_word.get("phrase") or ""),
+        sentence=sentence,
+        word=word,
+    )
+    key_chunk, wider_phrase = (
+        _extract_word_chunk(sentence, word) if sentence and word else (phrase, phrase)
+    )
+    if not key_chunk and phrase:
+        key_chunk = phrase
+    if not wider_phrase and phrase:
+        wider_phrase = phrase
+
+    joined = " ".join(
+        [
+            phrase,
+            key_chunk,
+            wider_phrase,
+            word,
+            " ".join(str(a.get("phrase") or "") for a in recent),
+            " ".join(str(a.get("word") or "") for a in recent),
+        ]
+    ).lower()
+
+    event_type = str(last.get("event_type") or last.get("type") or "")
+    trigger_ids = [
+        str(a.get("event_id") or "").strip()
+        for a in recent[-3:]
+        if isinstance(a, dict) and str(a.get("event_id") or "").strip()
+    ]
+
+    if (
+        difficulty == "question_evidence"
+        or (event_type == "reading_answer" and last.get("is_correct") is False)
+        or any(
+            (a.get("event_type") or a.get("type")) == "reading_answer"
+            and a.get("is_correct") is False
+            for a in recent
+            if isinstance(a, dict)
+        )
+    ):
+        return normalize_reading_helper_note_payload(
+            {
+                "card_type": "question_repair",
+                "priority": 5,
+                "trigger_event_ids": trigger_ids,
+                "title": "Sửa bằng evidence",
+                "target": {"text": phrase or sentence[:160]},
+                "diagnosis": "Bạn vừa chọn sai hoặc đang thiếu evidence rõ ràng cho câu hỏi.",
+                "guide": "Quay lại câu có cùng ý với prompt và chỉ giữ thông tin passage nói trực tiếp.",
+                "concrete_step": "Highlight một cụm 3-8 từ làm bằng chứng trước khi chọn tiếp.",
+                "mini_check": "Đáp án được nêu trực tiếp hay phải suy ra từ câu nào?",
+                "vocab": [],
+                "display": {"tone": "urgent", "icon": "repair"},
+                "should_show": True,
+                "reason_for_showing": "wrong reading answer",
+            }
+        )
+
+    if any(m in joined for m in _READING_LOGIC_MARKERS) or difficulty == "logic":
+        return normalize_reading_helper_note_payload(
+            {
+                "card_type": "logic_bridge",
+                "priority": 5,
+                "trigger_event_ids": trigger_ids,
+                "title": "Logic của câu",
+                "target": {"text": phrase or sentence[:160], "word": word or None},
+                "diagnosis": "Bạn đang chạm vào một đoạn có quan hệ logic như tương phản, nguyên nhân hoặc phạm vi.",
+                "guide": "Đọc hai vế quanh connector: vế nào là ý chính, vế nào chỉ bổ sung điều kiện hoặc đối lập.",
+                "concrete_step": "Viết lại quan hệ bằng một mũi tên ngắn: A -> vì/đối lập/dẫn tới -> B.",
+                "mini_check": "Connector đang nối hai ý theo quan hệ gì?",
+                "vocab": (
+                    [
+                        {
+                            "word": word,
+                            "meaning": "nghĩa theo ngữ cảnh",
+                            "in_context": key_chunk or word,
+                        }
+                    ]
+                    if word
+                    else []
+                ),
+                "display": {"tone": "normal", "icon": "logic"},
+                "should_show": True,
+                "reason_for_showing": "logic connector in learner action",
+            }
+        )
+
+    if word and event_type in ("word_click", "word_lookup", "lookup", "translate"):
+        chunk = key_chunk or phrase or word
+        return normalize_reading_helper_note_payload(
+            {
+                "card_type": "vocab_context",
+                "priority": 4,
+                "trigger_event_ids": trigger_ids,
+                "title": "Từ trong ngữ cảnh",
+                "target": {"text": wider_phrase or chunk, "word": word},
+                "diagnosis": f"Bạn đang kiểm tra «{word}», nên nghĩa cần gắn với cụm «{chunk}» trong câu.",
+                "guide": f"Đừng học «{word}» như một mục từ rời; đọc cả cụm «{chunk}» để lấy nghĩa đúng.",
+                "concrete_step": "Đọc lại nguyên câu một lần và thay cụm này bằng cách diễn đạt đơn giản hơn.",
+                "mini_check": f"«{chunk}» đang bổ nghĩa hoặc giải thích ý nào?",
+                "vocab": [
+                    {"word": word, "meaning": "nghĩa theo câu này", "in_context": chunk}
+                ],
+                "display": {"tone": "normal", "icon": "word"},
+                "should_show": True,
+                "reason_for_showing": "word interaction with context chunk",
+            }
+        )
+
+    target = phrase or wider_phrase or sentence
+    if target and (
+        len(target) > 40
+        or event_type
+        in ("text_select", "highlight", "highlight_add", "explain", "explain_request")
+    ):
+        return normalize_reading_helper_note_payload(
+            {
+                "card_type": (
+                    "evidence_hint" if "highlight" in event_type else "phrase_breakdown"
+                ),
+                "priority": 4,
+                "trigger_event_ids": trigger_ids,
+                "title": "Gỡ cụm đang đọc",
+                "target": {"text": target[:400]},
+                "diagnosis": "Bạn đang dừng lại ở một cụm/câu dài, có thể vì cấu trúc hoặc evidence chưa rõ.",
+                "guide": "Tách cụm này thành chủ thể, hành động chính và phần bổ sung; đừng dịch từng từ một.",
+                "concrete_step": "Gạch dưới động từ chính hoặc cụm evidence ngắn nhất trong câu.",
+                "mini_check": "Ai/điều gì đang làm gì trong cụm này?",
+                "vocab": [],
+                "display": {
+                    "tone": "normal",
+                    "icon": "evidence" if "highlight" in event_type else "phrase",
+                },
+                "should_show": True,
+                "reason_for_showing": "phrase interaction",
+            }
+        )
+
+    return normalize_reading_helper_note_payload(
+        {
+            "card_type": "reading_strategy",
+            "priority": 1,
+            "title": "",
+            "diagnosis": "",
+            "guide": "",
+            "concrete_step": "",
+            "vocab": [],
+            "should_show": False,
+            "reason_for_showing": "weak signals",
+        }
+    )
+
+
+def mock_reading_helper_text(*, context: Dict[str, Any]) -> str:
+    locale = str(context.get("locale") or "en").lower()
+    vi = locale.startswith("vi")
+    recent = context.get("recent_actions") or []
+    if not recent:
+        if vi:
+            return (
+                "### Từ vựng trọng tâm\n"
+                "- Đọc đoạn này để nắm chủ đề chính trước khi tra từ.\n"
+                "### Nghĩa trong ngữ cảnh\n"
+                "- Chú ý các từ chỉ thời gian, quy mô và mức độ — chúng thường mang ý logic của đoạn.\n"
+                "### Đọc đoạn này\n"
+                "- Double-click một từ khó hoặc bôi chọn cụm để nhận giải thích ngay tại đây.\n"
+            )
+        return (
+            "### Vocabulary focus\n"
+            "- Skim this paragraph for the main topic before looking up words.\n"
+            "### Meaning in context\n"
+            "- Watch time, scale, and degree words — they often carry the logic of the passage.\n"
+            "### Reading this paragraph\n"
+            "- Double-click a difficult word or select a phrase to get help here.\n"
+        )
+
+    last = recent[-3:]
+    vocab_lines: List[str] = []
+    context_lines: List[str] = []
+    read_lines: List[str] = []
+
+    for action in last:
+        et = str(action.get("type") or "")
+        if et == "lookup" and action.get("word"):
+            w = action["word"]
+            if vi:
+                vocab_lines.append(
+                    f"- **{w}**: đọc trong câu gốc, đoán nghĩa rồi đối chiếu định nghĩa vừa tra."
+                )
+            else:
+                vocab_lines.append(
+                    f"- **{w}**: read it in the host sentence, guess the sense, then match the definition you opened."
+                )
+        elif et == "translate":
+            src = str(action.get("phrase") or "")[:80]
+            tr = str(action.get("translation") or "")[:120]
+            if vi:
+                context_lines.append(
+                    f"- \"{src}\" → {tr or '…'}: nghĩa trong câu này, không tách rời ngữ cảnh."
+                )
+            else:
+                context_lines.append(
+                    f"- \"{src}\" → {tr or '…'}: keep the sense tied to this sentence, not isolated."
+                )
+        elif et == "highlight" and action.get("phrase"):
+            ph = str(action["phrase"])[:80]
+            if vi:
+                context_lines.append(
+                    f'- Cụm **"{ph}"**: paraphrase bằng tiếng Việt một câu, giữ vai trò trong đoạn.'
+                )
+            else:
+                context_lines.append(
+                    f'- Phrase **"{ph}"**: paraphrase in one line, keeping its role in the paragraph.'
+                )
+        elif et == "bold" and action.get("word"):
+            w = action["word"]
+            if vi:
+                vocab_lines.append(
+                    f"- **{w}**: bạn đang tập trung vào từ này — nghĩa cốt lõi trong đoạn là gì?"
+                )
+            else:
+                vocab_lines.append(
+                    f"- **{w}**: you're focusing on this word — what is its core sense here?"
+                )
+        elif et == "explain" and action.get("phrase"):
+            ph = str(action["phrase"])[:80]
+            if vi:
+                read_lines.append(
+                    f'- Cụm **"{ph}"**: nối ý câu trước và sau để thấy vì sao tác giả dùng cụm này.'
+                )
+            else:
+                read_lines.append(
+                    f'- **"{ph}"**: link the sentence before and after to see why the author used it.'
+                )
+
+    def _section(title: str, lines: List[str], fallback: str) -> str:
+        body = "\n".join(lines[-3:]) if lines else f"- {fallback}"
+        return f"{title}\n{body}\n"
+
+    if vi:
+        return (
+            _section(
+                "### Từ vựng trọng tâm",
+                vocab_lines,
+                "Tiếp tục với từ bạn vừa tương tác.",
+            )
+            + _section(
+                "### Nghĩa trong ngữ cảnh",
+                context_lines,
+                "Dịch hoặc tra từ trong câu để hiểu sâu hơn.",
+            )
+            + _section(
+                "### Đọc đoạn này",
+                read_lines,
+                "Đọc câu chứa từ vừa chọn trước khi sang câu tiếp theo.",
+            )
+        )
+    return (
+        _section(
+            "### Vocabulary focus",
+            vocab_lines,
+            "Stay with the word you just interacted with.",
+        )
+        + _section(
+            "### Meaning in context",
+            context_lines,
+            "Translate or look up words inside their sentence.",
+        )
+        + _section(
+            "### Reading this paragraph",
+            read_lines,
+            "Re-read the sentence with your latest word before moving on.",
+        )
+    )

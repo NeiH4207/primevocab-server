@@ -83,6 +83,34 @@ _COACHING_PACK_FALLBACK = (
     "pack_gre",
 )
 
+FOCUS_PLAN_MIN_WORDS = 12
+FOCUS_PLAN_MAX_WORDS = 20
+FOCUS_PLAN_SEED_LIMIT = 30
+FOCUS_SOURCE_FORGOTTEN = "Forgotten"
+FOCUS_SOURCE_INTERACTION = "Clicked"
+FOCUS_SOURCE_READING = "Reading keyword"
+FOCUS_SOURCE_FALLBACK = "Fallback"
+FOCUS_SOURCE_ORDER = (
+    FOCUS_SOURCE_FORGOTTEN,
+    FOCUS_SOURCE_INTERACTION,
+    FOCUS_SOURCE_READING,
+    FOCUS_SOURCE_FALLBACK,
+)
+FOCUS_SIGNAL_SCORES = {
+    "lookup": 55,
+    "word_lookup": 55,
+    "explain": 45,
+    "explain_request": 45,
+    "explain_result": 45,
+    "translate": 38,
+    "highlight": 32,
+    "highlight_add": 32,
+    "word_click": 24,
+    "reading_wrong": 42,
+    "reading_seed": 12,
+    "forgotten": 100,
+}
+
 
 def _cefr_index(level: Optional[str]) -> int:
     try:
@@ -102,6 +130,44 @@ def _ielts_band(level: str) -> float:
 
 def _ielts_range(level: str) -> str:
     return _IELTS_RANGE.get((level or "B1").upper(), "IELTS vocabulary ~5.0–5.5")
+
+
+def _coaching_word_key(item: Dict[str, Any]) -> str:
+    return normalize_token(str(item.get("lemma") or item.get("word") or ""))
+
+
+def _text_candidate_tokens(value: Any) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for raw in str(value or "").replace("’", "'").split():
+        token = normalize_token(raw)
+        if len(token) < 3 or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _coaching_word_has_quiz(item: Dict[str, Any]) -> bool:
+    return bool(item.get("quiz_steps"))
+
+
+def _difficulty_rank(item: Dict[str, Any]) -> float:
+    cefr_rank = _cefr_index(str(item.get("cefr") or "B1")) * 10
+    try:
+        band = float(item.get("ielts_band_min") or 0)
+    except (TypeError, ValueError):
+        band = 0.0
+    return round(cefr_rank + band, 2)
+
+
+def _role_for_level(word_cefr: Optional[str], plan_cefr: str) -> str:
+    delta = _cefr_index(word_cefr) - _cefr_index(plan_cefr)
+    if delta < 0:
+        return "lower"
+    if delta > 0:
+        return "stretch"
+    return "current"
 
 
 def _confidence_pct(value: Any) -> float:
@@ -252,19 +318,40 @@ class VocabCoachingService:
     async def _ensure_day_content(
         self, plan: VocabCoachingPlan, day: VocabCoachingDay
     ) -> None:
-        if day.words:
-            return
-        words = await self._build_word_mix(plan.cefr_level)
-        difficult = await self._detect_difficult_words(plan.cefr_level)
-        reading = build_reading_payload(difficult)
-        day.words = await self._enrich_coaching_words(words, plan_cefr=plan.cefr_level)
-        day.reading = reading
-        day.sessions = {
-            "recall": {"status": "pending"},
-            "reading": {"status": "pending"},
-            "notes": {"status": "pending"},
-        }
-        await self.s.flush()
+        mutated = False
+        if not day.words:
+            words = await self._build_word_mix(plan.cefr_level)
+            day.words = await self._enrich_coaching_words(
+                words, plan_cefr=plan.cefr_level
+            )
+            mutated = True
+
+        reading = dict(day.reading or {})
+        if not reading:
+            difficult = await self._detect_difficult_words(plan.cefr_level)
+            reading = build_reading_payload(difficult)
+            mutated = True
+
+        if not reading.get("vocab_candidates"):
+            reading["vocab_candidates"] = await self._build_reading_vocab_candidates(
+                plan.cefr_level,
+                reading.get("difficult_words") or [],
+                day.words or [],
+            )
+            day.reading = reading
+            mutated = True
+
+        if not day.sessions:
+            day.sessions = {
+                "recall": {"status": "pending"},
+                "reading": {"status": "pending"},
+                "focus": {"status": "pending"},
+                "notes": {"status": "pending"},
+            }
+            mutated = True
+
+        if mutated:
+            await self.s.flush()
 
     async def _build_word_mix(self, cefr: str) -> List[Dict[str, Any]]:
         current_level = cefr.upper()
@@ -286,6 +373,62 @@ class VocabCoachingService:
             for item in group:
                 out.append({**item, "role": role})
         return out
+
+    async def _build_reading_vocab_candidates(
+        self,
+        cefr: str,
+        difficult_words: Sequence[Dict[str, Any]],
+        fallback_words: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Quiz-ready vocab pool seeded by the reading passage itself."""
+        priority_tokens: List[str] = []
+        for item in difficult_words:
+            token = normalize_token(str(item.get("word") or ""))
+            if token:
+                priority_tokens.append(token)
+        priority_tokens.extend(passage_tokens())
+
+        briefs = await self.repo.lexemes_for_lemmas(
+            priority_tokens, limit=FOCUS_PLAN_SEED_LIMIT, require_quiz=True
+        )
+        out: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        async def add_word(
+            item: Dict[str, Any], source_role: Optional[str] = None
+        ) -> None:
+            enriched = await self._enrich_coaching_word(
+                {
+                    **item,
+                    "role": source_role
+                    or item.get("role")
+                    or _role_for_level(item.get("cefr"), cefr),
+                }
+            )
+            key = _coaching_word_key(enriched)
+            if not key or key in seen or not _coaching_word_has_quiz(enriched):
+                return
+            seen.add(key)
+            out.append(enriched)
+
+        for brief in briefs:
+            await add_word(brief)
+            if len(out) >= FOCUS_PLAN_SEED_LIMIT:
+                break
+
+        for word in fallback_words:
+            if len(out) >= FOCUS_PLAN_MAX_WORDS:
+                break
+            await add_word(word, str(word.get("role") or "current"))
+
+        if len(out) < FOCUS_PLAN_MIN_WORDS:
+            fillers = await self._build_word_mix(cefr)
+            for word in fillers:
+                if len(out) >= FOCUS_PLAN_MIN_WORDS:
+                    break
+                await add_word(word, str(word.get("role") or "current"))
+
+        return out[:FOCUS_PLAN_SEED_LIMIT]
 
     async def _lexemes_for_level(
         self,
@@ -543,7 +686,7 @@ class VocabCoachingService:
             recall = {
                 "kind": "recall",
                 "prompts": self._recall_prompts((prev.words if prev else []) or []),
-                "message": "Rate each word from yesterday: Remember or Forgot. Forgot words join today's Adaptive focus.",
+                "message": "Rate each word from yesterday: Remember or Forgot. Forgotten words will be mixed into the post-reading vocab focus.",
             }
 
         words = await self._enrich_coaching_words(
@@ -650,6 +793,378 @@ class VocabCoachingService:
         await self.s.flush()
         return {"saved": True, "workspace": workspace}
 
+    async def build_focus_plan(
+        self,
+        *,
+        user_id: str,
+        day_number: int,
+        recall_answers: Dict[str, Any],
+        reading_answers: Dict[str, Any],
+        reading_vocab_signals: Sequence[Dict[str, Any]],
+        min_words: int = FOCUS_PLAN_MIN_WORDS,
+        max_words: int = FOCUS_PLAN_MAX_WORDS,
+    ) -> Dict[str, Any]:
+        plan = await self._require_plan(user_id)
+        day = await self.repo.get_day(plan_id=plan.id, day_number=day_number)
+        if day is None or day_number > plan.current_day:
+            raise ValueError("Day is not available")
+        await self._ensure_day_content(plan, day)
+
+        sessions = dict(day.sessions or {})
+        workspace = (
+            dict(sessions.get("workspace") or {})
+            if isinstance(sessions.get("workspace"), dict)
+            else {}
+        )
+        existing = workspace.get("focus_plan")
+        if isinstance(existing, dict) and existing.get("words"):
+            return existing
+
+        persisted_events = await self.repo.list_events(
+            plan_id=plan.id,
+            day_number=day_number,
+            event_types=[
+                "lookup",
+                "word_lookup",
+                "word_click",
+                "text_select",
+                "translate",
+                "highlight",
+                "highlight_add",
+                "explain",
+                "explain_request",
+                "explain_result",
+                "reading_answer",
+            ],
+        )
+        persisted_actions = [
+            self._event_to_helper_action(event) for event in persisted_events
+        ]
+        combined_actions = self._dedupe_focus_actions(
+            [*persisted_actions, *list(reading_vocab_signals or [])]
+        )
+        focus_plan = await self._compose_focus_plan(
+            plan=plan,
+            day=day,
+            day_number=day_number,
+            recall_answers=recall_answers,
+            reading_answers=reading_answers,
+            actions=combined_actions,
+            min_words=min_words,
+            max_words=max_words,
+        )
+
+        workspace["focus_plan"] = focus_plan
+        workspace["updated_at"] = datetime.now(timezone.utc).isoformat()
+        sessions["workspace"] = workspace
+        focus_state = dict(sessions.get("focus") or {})
+        focus_state["status"] = "ready"
+        focus_state.setdefault("started_at", datetime.now(timezone.utc).isoformat())
+        sessions["focus"] = focus_state
+        day.sessions = sessions
+        await self.s.flush()
+        return focus_plan
+
+    def _dedupe_focus_actions(
+        self, actions: Sequence[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        seen: set[str] = set()
+        out: List[Dict[str, Any]] = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            target = (
+                action.get("target") if isinstance(action.get("target"), dict) else {}
+            )
+            payload = (
+                action.get("payload") if isinstance(action.get("payload"), dict) else {}
+            )
+            key = str(action.get("event_id") or "").strip()
+            if not key:
+                key = "|".join(
+                    str(action.get(name) or target.get(name) or payload.get(name) or "")
+                    for name in (
+                        "event_type",
+                        "word",
+                        "phrase",
+                        "paragraph_index",
+                    )
+                )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(action)
+        return out
+
+    async def _forgotten_recall_words(
+        self,
+        *,
+        plan: VocabCoachingPlan,
+        day_number: int,
+        recall_answers: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if day_number <= 1:
+            return []
+        prev = await self.repo.get_day(plan_id=plan.id, day_number=day_number - 1)
+        if prev is None:
+            return []
+        words = await self._enrich_coaching_words(
+            prev.words or [], plan_cefr=plan.cefr_level
+        )
+        forgotten: List[Dict[str, Any]] = []
+        for word in words:
+            if recall_answers.get(str(word.get("word") or "")) is False:
+                forgotten.append(word)
+        return forgotten
+
+    async def _compose_focus_plan(
+        self,
+        *,
+        plan: VocabCoachingPlan,
+        day: VocabCoachingDay,
+        day_number: int,
+        recall_answers: Dict[str, Any],
+        reading_answers: Dict[str, Any],
+        actions: Sequence[Dict[str, Any]],
+        min_words: int,
+        max_words: int,
+    ) -> Dict[str, Any]:
+        reading = dict(day.reading or {})
+        reading_candidates = [
+            item
+            for item in (reading.get("vocab_candidates") or [])
+            if isinstance(item, dict)
+        ]
+        fallback_words = await self._enrich_coaching_words(
+            day.words or [], plan_cefr=plan.cefr_level
+        )
+        forgotten_words = await self._forgotten_recall_words(
+            plan=plan, day_number=day_number, recall_answers=recall_answers
+        )
+
+        entries: Dict[str, Dict[str, Any]] = {}
+        omitted: Dict[str, Dict[str, Any]] = {}
+
+        def add_omitted(text: Any, reason: str, source: str) -> None:
+            clean = str(text or "").strip()
+            token = normalize_token(clean)
+            key = token or clean.lower()
+            if not key or key in omitted:
+                return
+            omitted[key] = {
+                "text": clean[:80] or key,
+                "reason": reason,
+                "source": source,
+            }
+
+        def add_word(item: Dict[str, Any], source: str, score: int) -> None:
+            key = _coaching_word_key(item)
+            if not key:
+                return
+            if not _coaching_word_has_quiz(item):
+                add_omitted(item.get("word") or key, "no_quiz_steps", source)
+                return
+            existing = entries.get(key)
+            if existing is None:
+                entries[key] = {
+                    "word": dict(item),
+                    "sources": {source},
+                    "score": score,
+                    "difficulty": _difficulty_rank(item),
+                }
+                return
+            existing["sources"].add(source)
+            existing["score"] += score
+            if len(item.get("quiz_steps") or []) > len(
+                existing["word"].get("quiz_steps") or []
+            ):
+                existing["word"] = dict(item)
+
+        for item in forgotten_words:
+            add_word(item, FOCUS_SOURCE_FORGOTTEN, FOCUS_SIGNAL_SCORES["forgotten"])
+        for item in reading_candidates:
+            add_word(item, FOCUS_SOURCE_READING, FOCUS_SIGNAL_SCORES["reading_seed"])
+        for item in fallback_words:
+            add_word(item, FOCUS_SOURCE_FALLBACK, 0)
+
+        interaction_keys = self._apply_interaction_scores(entries, omitted, actions)
+        wrong_keys = self._apply_wrong_reading_scores(
+            entries,
+            omitted,
+            reading.get("questions") or [],
+            reading_answers,
+        )
+        friction_count = len(interaction_keys | wrong_keys)
+        target = self._adaptive_focus_size(
+            friction_count=friction_count, min_words=min_words, max_words=max_words
+        )
+
+        def bucket(entry: Dict[str, Any]) -> int:
+            sources = entry["sources"]
+            for index, source in enumerate(FOCUS_SOURCE_ORDER):
+                if source in sources:
+                    return index
+            return len(FOCUS_SOURCE_ORDER)
+
+        sorted_entries = sorted(
+            entries.values(),
+            key=lambda entry: (
+                bucket(entry),
+                float(entry["difficulty"]),
+                -int(entry["score"]),
+                str(entry["word"].get("word") or "").lower(),
+            ),
+        )
+        selected = sorted_entries[:target]
+
+        words: List[Dict[str, Any]] = []
+        for entry in selected:
+            sources = [
+                source for source in FOCUS_SOURCE_ORDER if source in entry["sources"]
+            ]
+            word = dict(entry["word"])
+            word["focusSources"] = sources
+            word["interactionScore"] = int(entry["score"])
+            word["difficultyRank"] = float(entry["difficulty"])
+            word["fromYesterdayForgot"] = FOCUS_SOURCE_FORGOTTEN in sources
+            word["fromReading"] = FOCUS_SOURCE_READING in sources
+            word["fromUserInteraction"] = FOCUS_SOURCE_INTERACTION in sources
+            words.append(word)
+
+        summary = {
+            "forgotten": sum(1 for word in words if word.get("fromYesterdayForgot")),
+            "interaction": sum(1 for word in words if word.get("fromUserInteraction")),
+            "reading": sum(1 for word in words if word.get("fromReading")),
+            "fallback": sum(
+                1
+                for word in words
+                if FOCUS_SOURCE_FALLBACK in (word.get("focusSources") or [])
+            ),
+            "total": len(words),
+            "target": target,
+            "friction_count": friction_count,
+            "candidate_count": len(entries),
+            "omitted": len(omitted),
+        }
+        return {
+            "words": words,
+            "summary": summary,
+            "omitted_candidates": list(omitted.values())[:12],
+            "finalized_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _apply_interaction_scores(
+        self,
+        entries: Dict[str, Dict[str, Any]],
+        omitted: Dict[str, Dict[str, Any]],
+        actions: Sequence[Dict[str, Any]],
+    ) -> set[str]:
+        interaction_keys: set[str] = set()
+        word_click_counts: Dict[str, int] = {}
+
+        def score_text(text: Any, score: int, source_event: str) -> None:
+            for token in _text_candidate_tokens(text):
+                entry = entries.get(token)
+                if entry is None:
+                    omitted.setdefault(
+                        token,
+                        {
+                            "text": token,
+                            "reason": "no_quiz_steps",
+                            "source": source_event,
+                        },
+                    )
+                    continue
+                entry["sources"].add(FOCUS_SOURCE_INTERACTION)
+                entry["score"] += score
+                interaction_keys.add(token)
+
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            event_type = str(action.get("event_type") or action.get("type") or "")
+            target = (
+                action.get("target") if isinstance(action.get("target"), dict) else {}
+            )
+            word = action.get("word") or target.get("word")
+            phrase = action.get("phrase") or target.get("phrase") or target.get("text")
+            if event_type in ("lookup", "word_lookup"):
+                score_text(word or phrase, FOCUS_SIGNAL_SCORES["lookup"], event_type)
+            elif event_type in ("translate",):
+                score_text(phrase or word, FOCUS_SIGNAL_SCORES["translate"], event_type)
+            elif event_type in ("explain", "explain_request", "explain_result"):
+                score_text(phrase or word, FOCUS_SIGNAL_SCORES["explain"], event_type)
+            elif event_type in ("highlight", "highlight_add"):
+                score_text(phrase or word, FOCUS_SIGNAL_SCORES["highlight"], event_type)
+            elif event_type in ("word_click", "text_select"):
+                tokens = _text_candidate_tokens(word or phrase)
+                if len(tokens) <= 2:
+                    for token in tokens:
+                        word_click_counts[token] = word_click_counts.get(token, 0) + 1
+
+        for token, count in word_click_counts.items():
+            if count < 2:
+                continue
+            entry = entries.get(token)
+            if entry is None:
+                omitted.setdefault(
+                    token,
+                    {"text": token, "reason": "no_quiz_steps", "source": "word_click"},
+                )
+                continue
+            entry["sources"].add(FOCUS_SOURCE_INTERACTION)
+            entry["score"] += FOCUS_SIGNAL_SCORES["word_click"]
+            interaction_keys.add(token)
+        return interaction_keys
+
+    def _apply_wrong_reading_scores(
+        self,
+        entries: Dict[str, Dict[str, Any]],
+        omitted: Dict[str, Dict[str, Any]],
+        questions: Sequence[Dict[str, Any]],
+        reading_answers: Dict[str, Any],
+    ) -> set[str]:
+        wrong_keys: set[str] = set()
+        by_id = {str(q.get("id") or ""): q for q in questions if isinstance(q, dict)}
+        for question_id, selected in reading_answers.items():
+            question = by_id.get(str(question_id))
+            if not question or selected == question.get("correct_option"):
+                continue
+            source_word = question.get("source_word")
+            for token in _text_candidate_tokens(source_word):
+                entry = entries.get(token)
+                if entry is None:
+                    omitted.setdefault(
+                        token,
+                        {
+                            "text": token,
+                            "reason": "no_quiz_steps",
+                            "source": "reading_answer",
+                        },
+                    )
+                    continue
+                entry["sources"].add(FOCUS_SOURCE_INTERACTION)
+                entry["score"] += FOCUS_SIGNAL_SCORES["reading_wrong"]
+                wrong_keys.add(token)
+        return wrong_keys
+
+    def _adaptive_focus_size(
+        self, *, friction_count: int, min_words: int, max_words: int
+    ) -> int:
+        lower = max(
+            1, min(FOCUS_PLAN_MIN_WORDS, int(min_words or FOCUS_PLAN_MIN_WORDS))
+        )
+        upper = max(lower, min(30, int(max_words or FOCUS_PLAN_MAX_WORDS)))
+        if friction_count <= 2:
+            target = 12
+        elif friction_count <= 5:
+            target = 15
+        elif friction_count <= 8:
+            target = 18
+        else:
+            target = 20
+        return max(lower, min(upper, target))
+
     # ================================================================= events
     async def record_events(
         self, *, user_id: str, day_number: int, events: Sequence[Dict[str, Any]]
@@ -713,6 +1228,11 @@ class VocabCoachingService:
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.warning("coaching helper OpenAI stream failed: {}", exc)
+        elif settings.llm_provider == "openai":
+            logger.warning(
+                "coaching helper OpenAI stream falling back to mock: OPENAI_API_KEY missing model={}",
+                model,
+            )
 
         text = mock_reading_helper_text(context=context)
         for piece in text.split(" "):
@@ -787,9 +1307,23 @@ class VocabCoachingService:
                 if raw:
                     card = normalize_reading_helper_note_payload(extract_json(raw))
                     return self._reading_coach_card_response(card)
+                logger.warning(
+                    "coaching helper note OpenAI returned empty content model={}",
+                    model,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("coaching helper note OpenAI failed: {}", exc)
+        elif settings.llm_provider == "openai":
+            logger.warning(
+                "coaching helper note falling back to mock: OPENAI_API_KEY missing model={}",
+                model,
+            )
 
+        logger.warning(
+            "coaching helper note using mock fallback model={} has_api_key={}",
+            model,
+            bool(api_key),
+        )
         card = mock_reading_helper_note(context=context)
         return self._reading_coach_card_response(card)
 

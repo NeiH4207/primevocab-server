@@ -256,6 +256,63 @@ class VocabCoachingRepo:
                 break
         return out
 
+    async def lexemes_for_lemmas(
+        self,
+        lemmas: Sequence[str],
+        *,
+        limit: int = 40,
+        require_quiz: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Return quiz-ready lexeme briefs in the same rough order as input lemmas."""
+        unique: List[str] = []
+        seen: set[str] = set()
+        for lemma in lemmas:
+            clean = str(lemma or "").strip().lower()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            unique.append(clean)
+            if len(unique) >= max(limit * 2, limit):
+                break
+        if not unique:
+            return []
+
+        stmt = select(VocabLexeme).where(
+            VocabLexeme.status.in_(_USABLE_LEXEME_STATUS),
+            (
+                func.lower(VocabLexeme.lemma).in_(tuple(unique))
+                | func.lower(VocabLexeme.display_word).in_(tuple(unique))
+            ),
+        )
+        if require_quiz:
+            stmt = stmt.where(
+                exists(
+                    select(1).where(
+                        VocabQuestion.lexeme_id == VocabLexeme.id,
+                        VocabQuestion.status.in_(_USABLE_QUESTION_STATUS),
+                    )
+                )
+            )
+        rows = list((await self.s.execute(stmt)).scalars().all())
+        by_key: Dict[str, VocabLexeme] = {}
+        for lexeme in rows:
+            for key in (lexeme.lemma, lexeme.display_word):
+                clean = str(key or "").strip().lower()
+                if clean and clean not in by_key:
+                    by_key[clean] = lexeme
+
+        out: List[Dict[str, Any]] = []
+        emitted: set[uuid.UUID] = set()
+        for lemma in unique:
+            lexeme = by_key.get(lemma)
+            if lexeme is None or lexeme.id in emitted:
+                continue
+            emitted.add(lexeme.id)
+            out.append(await self._lexeme_brief(lexeme))
+            if len(out) >= limit:
+                break
+        return out
+
     async def _lexeme_brief(self, lexeme: VocabLexeme) -> Dict[str, Any]:
         sense = (
             await self.s.execute(

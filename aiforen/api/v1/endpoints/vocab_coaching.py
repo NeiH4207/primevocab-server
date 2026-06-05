@@ -62,6 +62,14 @@ class CoachingDayProgressIn(BaseModel):
     workspace: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CoachingFocusPlanIn(BaseModel):
+    recall_answers: Dict[str, bool] = Field(default_factory=dict)
+    reading_answers: Dict[str, str] = Field(default_factory=dict)
+    reading_vocab_signals: List[Dict[str, Any]] = Field(default_factory=list)
+    min_words: int = Field(default=12, ge=1, le=30)
+    max_words: int = Field(default=20, ge=1, le=30)
+
+
 class CoachingEventsIn(BaseModel):
     day_number: int = Field(..., ge=1, le=366)
     events: List[CoachingEventIn]
@@ -190,6 +198,29 @@ async def coaching_save_progress(
                 user_id=user.id,
                 day_number=day_number,
                 workspace=payload.workspace,
+            )
+        )
+    except ValueError as exc:
+        raise _guard(exc)
+
+
+@router.post("/days/{day_number}/focus-plan")
+async def coaching_focus_plan(
+    day_number: int,
+    payload: CoachingFocusPlanIn,
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _ok(
+            await _svc(pg).build_focus_plan(
+                user_id=user.id,
+                day_number=day_number,
+                recall_answers=payload.recall_answers,
+                reading_answers=payload.reading_answers,
+                reading_vocab_signals=payload.reading_vocab_signals,
+                min_words=payload.min_words,
+                max_words=payload.max_words,
             )
         )
     except ValueError as exc:

@@ -105,11 +105,21 @@ class CoachingHelperStreamIn(BaseModel):
     recent_actions: List[CoachingHelperActionIn] = Field(default_factory=list)
 
 
+class ReadingCoachSelectionIn(BaseModel):
+    selection_type: str = Field(..., pattern="^(word|sentence)$")
+    selected_text: str = Field(..., min_length=1, max_length=1200)
+    sentence_text: str = Field(default="", max_length=1200)
+    paragraph_text: str = Field(default="", max_length=2400)
+    passage_title: str = Field(default="", max_length=200)
+    user_level: Optional[str] = Field(default=None, max_length=32)
+
+
 class CoachingHelperNoteIn(BaseModel):
     day_number: int = Field(..., ge=1, le=366)
     locale: str = Field(default="en", min_length=2, max_length=8)
     paragraph_index: int = Field(default=0, ge=0, le=50)
     visible_paragraph_indexes: List[int] = Field(default_factory=list)
+    reading_selection: Optional[ReadingCoachSelectionIn] = None
     reading_state: Optional[Dict[str, Any]] = None
     recent_actions: List[CoachingHelperActionIn] = Field(default_factory=list)
 
@@ -272,6 +282,11 @@ async def coaching_helper_note(
                 locale=payload.locale,
                 paragraph_index=payload.paragraph_index,
                 visible_paragraph_indexes=payload.visible_paragraph_indexes,
+                reading_selection=(
+                    payload.reading_selection.model_dump()
+                    if payload.reading_selection
+                    else None
+                ),
                 reading_state=payload.reading_state,
                 recent_actions=[
                     action.model_dump() for action in payload.recent_actions

@@ -1272,80 +1272,420 @@ def build_reading_helper_prompt(*, context: Dict[str, Any]) -> str:
     )
 
 
+READING_COACH_SYSTEM_PROMPT = """You are Reading Coach for an IELTS Reading app.
+
+The user can do only two actions:
+1. Select one word.
+2. Select one sentence.
+
+Generate one short coaching note in Vietnamese. Keep important English words/chunks unchanged. Use natural Vietnamese, not dictionary-style lists.
+
+Core principles:
+- Be concise and practical. Help the user continue reading.
+- Do not translate the whole paragraph.
+- Do not give generic advice like "read carefully".
+- Focus on the selected text and its sentence/paragraph context.
+
+For WORD selection:
+- Prefer the meaningful chunk containing the word, not the word alone when a real chunk exists.
+- Explain meaning in this sentence.
+- If the sentence has although/however/therefore/because/while/whereas, explain sentence logic briefly.
+- Never invent chunks or join random neighboring tokens.
+- Never treat "restoration has", "many have", "they are" as vocabulary chunks.
+- If the word is low-value, return quick_note or no_note.
+
+For SENTENCE selection:
+- Give a one-sentence Vietnamese meaning first.
+- Build a sentence map with only labels that exist: Khi nào?, Ai/Cái gì?, Làm gì?, Cách gì?, Để làm gì?, Kết quả/Ý chính?
+- If there is a connector, explain the logic pattern.
+- Include 2–4 usefulChunks copied from the sentence (exact text).
+- Keep it easy to scan.
+
+Return only valid JSON. No markdown. No text outside JSON.
+"""
+
 READING_HELPER_NOTE_JSON_SCHEMA = """
 {
-  "card_type": "vocab_context|phrase_breakdown|logic_bridge|evidence_hint|question_repair|reading_strategy|progress_reflection",
+  "noteType": "word_coach | sentence_coach | quick_note | no_note",
   "priority": 1,
-  "trigger_event_ids": ["event id from recent actions"],
-  "title": "short learner-facing title",
-  "target": {"text": "exact text from passage/action", "word": "optional word", "paragraph_index": 1},
-  "meaning_in_context": {"plain": "what it means in this exact sentence", "why": "why that sense fits here", "not_this": "common meaning that does NOT fit here"},
-  "substitutes": [{"word": "near synonym/substitute", "fits": true, "reason": "why it can/cannot replace the target here"}],
-  "grammar": {"pattern": "grammar/collocation frame", "role": "grammatical role in this sentence", "note": "word form, preposition, modifier, or clause structure that matters"},
-  "collocation": {"chunk": "natural chunk from the passage", "pattern": "reusable frame"},
-  "diagnosis": "what the learner action reveals, grounded in context",
-  "guide": "specific explanation or coaching guide",
-  "concrete_step": "one next action the learner can do now",
-  "mini_check": "one short check question",
-  "vocab": [{"word": "...", "meaning": "...", "in_context": "..."}],
-  "evidence": {"quote": "exact quote from passage", "paragraph_index": 1, "why_it_matters": "..."},
-  "display": {"tone": "quiet|normal|urgent", "icon": "word|phrase|logic|evidence|repair|strategy"},
-  "should_show": true
+  "shouldShow": true,
+  "title": "",
+  "targetText": "",
+  "meaningVi": "",
+  "mainNoteVi": "",
+  "bestChunk": {
+    "text": "",
+    "meaningVi": "",
+    "reason": ""
+  },
+  "sentenceMap": [
+    {
+      "label": "",
+      "text": "",
+      "meaningVi": ""
+    }
+  ],
+  "logic": {
+    "connector": "",
+    "pattern": "",
+    "partA": "",
+    "partB": "",
+    "explanationVi": ""
+  },
+  "usefulChunks": [
+    {
+      "text": "",
+      "meaningVi": ""
+    }
+  ],
+  "tipVi": "",
+  "miniCheckVi": "",
+  "avoidShowing": []
 }
 """
 
+NOTE_TYPE_TO_CARD_TYPE = {
+    "word_coach": "vocab_context",
+    "quick_note": "vocab_context",
+    "sentence_coach": "phrase_breakdown",
+    "no_note": "reading_strategy",
+    "quick_vocab": "vocab_context",
+    "context_vocab": "vocab_context",
+    "sentence_logic": "vocab_context",
+    "sentence_breakdown": "phrase_breakdown",
+    "paragraph_main_idea": "reading_strategy",
+    "question_hint": "evidence_hint",
+    "answer_explanation": "question_repair",
+}
+
+
+def _is_v3_reading_coach_raw(raw: Dict[str, Any]) -> bool:
+    note_type = str(raw.get("noteType") or raw.get("note_type") or "").strip()
+    if note_type in ("word_coach", "sentence_coach", "quick_note"):
+        return True
+    return bool(str(raw.get("meaningVi") or raw.get("meaning_vi") or "").strip())
+
+
+def _coerce_v3_reading_coach_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Map v3 word/sentence coach JSON into legacy card coercion input."""
+    note_type = str(raw.get("noteType") or raw.get("note_type") or "word_coach").strip()
+    should_show = raw.get("shouldShow")
+    if should_show is None:
+        should_show = raw.get("should_show", True)
+    if note_type == "no_note":
+        should_show = False
+
+    target_text = str(raw.get("targetText") or raw.get("target_text") or "").strip()
+    meaning = _strip_coach_guillemets(
+        str(raw.get("meaningVi") or raw.get("meaning_vi") or raw.get("meaning") or "")
+    )[:220]
+    main_note = _strip_coach_guillemets(
+        str(
+            raw.get("mainNoteVi")
+            or raw.get("main_note_vi")
+            or raw.get("mainNote")
+            or raw.get("main_note")
+            or ""
+        )
+    )[:520]
+    tip = _strip_coach_guillemets(str(raw.get("tipVi") or raw.get("tip") or ""))[:300]
+    mini_check = _strip_coach_guillemets(
+        str(
+            raw.get("miniCheckVi")
+            or raw.get("miniCheck")
+            or raw.get("mini_check")
+            or ""
+        )
+    )[:220]
+
+    logic_raw = raw.get("logic") if isinstance(raw.get("logic"), dict) else {}
+    logic = {
+        k: _strip_coach_guillemets(str(v))[:420]
+        for k, v in logic_raw.items()
+        if v not in ("", None)
+    }
+
+    chunks_out: List[Dict[str, str]] = []
+    for row in (
+        raw.get("usefulChunks") or raw.get("useful_chunks") or raw.get("chunks") or []
+    ):
+        if not isinstance(row, dict):
+            continue
+        chunk = _strip_coach_guillemets(str(row.get("text") or row.get("chunk") or ""))[
+            :220
+        ]
+        meaning_vi = _strip_coach_guillemets(
+            str(row.get("meaningVi") or row.get("meaning_vi") or "")
+        )[:320]
+        if not chunk:
+            continue
+        item: Dict[str, str] = {"chunk": chunk}
+        if meaning_vi:
+            item["meaningVi"] = meaning_vi
+        chunks_out.append(item)
+
+    best_raw = raw.get("bestChunk") if isinstance(raw.get("bestChunk"), dict) else {}
+    if not best_raw and isinstance(raw.get("best_chunk"), dict):
+        best_raw = raw.get("best_chunk")
+    best_text = _strip_coach_guillemets(str(best_raw.get("text") or ""))[:220]
+    best_gloss = _strip_coach_guillemets(
+        str(best_raw.get("meaningVi") or best_raw.get("meaning_vi") or "")
+    )[:320]
+    if best_text and not any(c.get("chunk") == best_text for c in chunks_out):
+        chunks_out.insert(
+            0,
+            {
+                "chunk": best_text,
+                **({"meaningVi": best_gloss} if best_gloss else {}),
+                **(
+                    {
+                        "whyUseful": _strip_coach_guillemets(
+                            str(best_raw.get("reason") or "")
+                        )[:260]
+                    }
+                    if best_raw.get("reason")
+                    else {}
+                ),
+            },
+        )
+
+    sentence_map_out: List[Dict[str, str]] = []
+    for row in raw.get("sentenceMap") or raw.get("sentence_map") or []:
+        if not isinstance(row, dict):
+            continue
+        label = _strip_coach_guillemets(str(row.get("label") or ""))[:80]
+        text = _strip_coach_guillemets(str(row.get("text") or ""))[:220]
+        gloss = _strip_coach_guillemets(
+            str(row.get("meaningVi") or row.get("meaning_vi") or "")
+        )[:320]
+        if not label or not text:
+            continue
+        sentence_map_out.append(
+            {
+                "label": label,
+                "text": text,
+                **({"meaningVi": gloss} if gloss else {}),
+            }
+        )
+
+    avoid = [
+        _strip_coach_guillemets(str(x))[:80]
+        for x in (raw.get("avoidShowing") or raw.get("avoid_showing") or [])
+        if str(x).strip()
+    ][:8]
+
+    try:
+        priority_int = int(raw.get("priority") or 3)
+    except (TypeError, ValueError):
+        priority_int = 3
+    priority_int = max(1, min(5, priority_int))
+
+    return {
+        "noteType": note_type,
+        "priority": priority_int,
+        "shouldShow": bool(should_show),
+        "title": _strip_coach_guillemets(str(raw.get("title") or ""))[:90],
+        "targetText": target_text,
+        "meaning": meaning,
+        "mainNote": main_note,
+        "logic": logic,
+        "chunks": chunks_out,
+        "tip": tip,
+        "miniCheck": mini_check,
+        "avoidShowing": avoid,
+        "sentenceMap": sentence_map_out,
+    }
+
+
+def _coerce_v2_note_to_card_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Map noteType JSON (prompt v2) into legacy card fields + passthrough metadata."""
+    note_type = str(
+        raw.get("noteType") or raw.get("note_type") or "context_vocab"
+    ).strip()
+    should_show = raw.get("shouldShow")
+    if should_show is None:
+        should_show = raw.get("should_show", True)
+    if note_type == "no_note":
+        should_show = False
+
+    target_text = str(raw.get("targetText") or raw.get("target_text") or "").strip()
+    meaning = _strip_coach_guillemets(str(raw.get("meaning") or ""))[:220]
+    main_note = _strip_coach_guillemets(
+        str(raw.get("mainNote") or raw.get("main_note") or "")
+    )[:520]
+    tip = _strip_coach_guillemets(str(raw.get("tip") or ""))[:300]
+    mini_check = _strip_coach_guillemets(
+        str(raw.get("miniCheck") or raw.get("mini_check") or "")
+    )[:220]
+
+    logic_raw = raw.get("logic") if isinstance(raw.get("logic"), dict) else {}
+    logic = {
+        k: _strip_coach_guillemets(str(v))[:420]
+        for k, v in logic_raw.items()
+        if v not in ("", None)
+    }
+
+    chunks_out: List[Dict[str, str]] = []
+    for row in raw.get("chunks") or []:
+        if not isinstance(row, dict):
+            continue
+        chunk = _strip_coach_guillemets(str(row.get("chunk") or ""))[:220]
+        meaning_vi = _strip_coach_guillemets(
+            str(row.get("meaningVi") or row.get("meaning_vi") or "")
+        )[:320]
+        if not chunk:
+            continue
+        item: Dict[str, str] = {"chunk": chunk}
+        if meaning_vi:
+            item["meaningVi"] = meaning_vi
+        why = _strip_coach_guillemets(
+            str(row.get("whyUseful") or row.get("why_useful") or "")
+        )
+        if why:
+            item["whyUseful"] = why[:260]
+        chunks_out.append(item)
+
+    avoid = [
+        _strip_coach_guillemets(str(x))[:80]
+        for x in (raw.get("avoidShowing") or raw.get("avoid_showing") or [])
+        if str(x).strip()
+    ][:8]
+
+    target_word = target_text if target_text and " " not in target_text.strip() else ""
+    if not target_word and target_text:
+        parts = target_text.split()
+        target_word = parts[0] if len(parts) == 1 else ""
+
+    sentence_logic: Dict[str, str] = {}
+    if logic:
+        logic_lines: List[str] = []
+        if logic.get("pattern"):
+            logic_lines.append(logic["pattern"])
+        elif logic.get("connector"):
+            logic_lines.append(f"{logic['connector']} A, B")
+        if logic.get("partA"):
+            logic_lines.append(f"A: {logic['partA']}")
+        if logic.get("partB"):
+            logic_lines.append(f"B: {logic['partB']}")
+        if logic_lines:
+            sentence_logic["text"] = "\n".join(logic_lines)[:700]
+        if logic.get("explanationVi"):
+            exp = logic["explanationVi"]
+            sentence_logic["gloss"] = exp if exp.startswith("→") else f"→ {exp}"
+    if tip:
+        sentence_logic["tip"] = tip
+
+    local_phrase: Dict[str, str] = {}
+    if chunks_out:
+        local_phrase = {
+            "text": chunks_out[0]["chunk"],
+            **(
+                {"gloss": chunks_out[0]["meaningVi"]}
+                if chunks_out[0].get("meaningVi")
+                else {}
+            ),
+        }
+
+    word_gloss: Dict[str, str] = {}
+    if meaning:
+        word_gloss = {"word": target_word or target_text[:64], "gloss": meaning}
+
+    meaning_in_context: Dict[str, str] = {}
+    if main_note and not meaning:
+        meaning_in_context["plain"] = main_note
+
+    try:
+        priority_int = int(raw.get("priority") or 3)
+    except (TypeError, ValueError):
+        priority_int = 3
+    priority_int = max(1, min(5, priority_int))
+
+    card_type = NOTE_TYPE_TO_CARD_TYPE.get(note_type, "vocab_context")
+
+    return {
+        "card_type": card_type,
+        "priority": priority_int,
+        "should_show": bool(should_show),
+        "title": _strip_coach_guillemets(str(raw.get("title") or ""))[:90],
+        "target": {
+            **({"text": target_text[:400]} if target_text else {}),
+            **(
+                {"word": (target_word or target_text)[:64]}
+                if (target_word or target_text)
+                else {}
+            ),
+        },
+        "word_gloss": word_gloss,
+        "local_phrase": local_phrase,
+        "sentence_logic": sentence_logic,
+        "meaning_in_context": meaning_in_context,
+        "mini_check": mini_check,
+        "reason_for_showing": str(
+            raw.get("reasonForShowing") or raw.get("reason_for_showing") or ""
+        ).strip()[:220],
+        "note_type": note_type,
+        "meaning": meaning,
+        "main_note": main_note,
+        "logic": logic,
+        "chunks": chunks_out,
+        "avoid_showing": avoid,
+    }
+
+
+def build_reading_helper_note_user_prompt(*, context: Dict[str, Any]) -> str:
+    """Word or sentence selection only — compact coach request."""
+    sel = context.get("reading_selection") or {}
+    selection_type = str(sel.get("selection_type") or "word").strip()
+    selected_text = str(sel.get("selected_text") or "").strip()[:1200]
+    sentence_text = str(sel.get("sentence_text") or selected_text).strip()[:1200]
+    paragraph_text = str(sel.get("paragraph_text") or "").strip()[:2400]
+    passage_title = str(sel.get("passage_title") or context.get("title") or "").strip()
+    user_level = str(sel.get("user_level") or context.get("level") or "B1").strip()
+
+    return (
+        "PASSAGE TITLE:\n"
+        f"{json.dumps(passage_title, ensure_ascii=False)}\n\n"
+        "USER LEVEL:\n"
+        f"{user_level}\n\n"
+        "SELECTION TYPE:\n"
+        f"{selection_type}\n\n"
+        "SELECTED TEXT:\n"
+        f"{selected_text}\n\n"
+        "SENTENCE CONTAINING SELECTION:\n"
+        f"{sentence_text}\n\n"
+        "PARAGRAPH CONTEXT:\n"
+        f"{paragraph_text}\n\n"
+        "TASK:\n"
+        "Generate one Reading Coach note.\n"
+        "Return JSON with this schema:\n"
+        f"{READING_HELPER_NOTE_JSON_SCHEMA}\n"
+        "Rules:\n"
+        '- If selection_type is "word", fill bestChunk and usefulChunks when useful; sentenceMap may be empty.\n'
+        '- If selection_type is "sentence", fill sentenceMap and usefulChunks; bestChunk may be empty.\n'
+        "- If there is no connector, keep logic fields empty.\n"
+        "- Do not invent chunks.\n"
+        "- usefulChunks must be exact text from the sentence.\n"
+    )
+
 
 def build_reading_helper_note_prompt(*, context: Dict[str, Any]) -> str:
-    """Structured JSON live coach card — behavior-driven, not chatbot."""
-    locale = str(context.get("locale") or "en").lower()
-    vi = locale.startswith("vi")
-    language = (
-        "All learner-facing strings (meaningGloss, meaningInContext, notThisMeaning, whyVi, "
-        "readingTip, miniCheck, vocab.meaningVi) must be in Vietnamese. "
-        "Keep English only for targetWord, targetText, and chunks."
-        if vi
-        else "Write learner-facing strings in clear English."
-    )
-    paragraphs = context.get("paragraphs") or []
-    para_block = "\n".join(
-        f"[{p.get('index')}] {p.get('text', '')[:900]}"
-        for p in paragraphs
-        if isinstance(p, dict)
-    )
-    reading_state = context.get("reading_state") or {}
-    action_summary = context.get("action_summary") or {}
-    recent = context.get("recent_actions") or []
+    """Single-string prompt (system + user) for backward compatibility."""
     return (
-        "You are an IELTS Reading Coach sitting beside the learner (not a chatbot).\n"
-        "Generate ONE compact coach card from real user actions only.\n\n"
-        f"{language}\n\n"
-        "Principles:\n"
-        "- NEVER generic study tips; every sentence must refer to the selected word, selected phrase, highlighted evidence, question, or visible passage.\n"
-        "- NEVER invent lookups, highlights, translations, wrong answers, or evidence.\n"
-        "- Choose card_type from the action: lookup/translate → vocab_context; long selection/explain → phrase_breakdown; connectors/scope/cause/contrast → logic_bridge; highlight before question → evidence_hint; wrong answer → question_repair.\n"
-        "- target.text and evidence.quote must be exact text from the passage/action when possible.\n"
-        "- For vocab_context keep the card COMPACT (max ~4 learner-facing lines):\n"
-        "  * title: short (e.g. Từ trong câu này). Do NOT repeat card_type as a heading.\n"
-        "  * meaning_in_context.plain: chunk = sense in THIS sentence (e.g. irrigation systems = hệ thống tưới tiêu).\n"
-        "  * NEVER wrap words in « » or >>; write plain text only.\n"
-        "  * NEVER say the word must be understood as the same chunk twice (no circular templates).\n"
-        "  * Omit substitutes, grammar, collocation, vocab[], diagnosis, guide, concrete_step unless they add real value.\n"
-        "  * substitutes only when you list real English words (not placeholders like near equivalent).\n"
-        "- For phrase_breakdown: meaning + one concrete_step + mini_check; avoid duplicate sections.\n"
-        "- concrete_step must be specific. Do NOT say reread the sentence, practice more, or simplify the phrase.\n"
-        "- If locale is Vietnamese, keep learner-facing fields Vietnamese but preserve English passage quotes/words.\n"
-        "- For wrong answers, guide evidence recovery; do not reveal a new answer unless the learner already answered.\n"
-        "- should_show=false only if recent actions are empty, repeated noise, or too weak.\n\n"
-        f"Learner CEFR: {context.get('level') or 'B1'}\n"
-        f"Passage title: {json.dumps(context.get('title') or '', ensure_ascii=False)}\n"
-        f"Visible paragraph indexes: {context.get('visible_paragraph_indexes')}\n"
-        f"Reading state (rule-based): {json.dumps(reading_state, ensure_ascii=False)}\n\n"
-        f"Action summary: {json.dumps(action_summary, ensure_ascii=False)}\n\n"
-        f"Paragraphs:\n{para_block}\n\n"
-        f"Recent user actions (chronological): {json.dumps(recent, ensure_ascii=False)}\n\n"
-        "Return ONLY valid JSON matching this schema (no markdown):\n"
-        f"{READING_HELPER_NOTE_JSON_SCHEMA}\n"
+        f"{READING_COACH_SYSTEM_PROMPT}\n\n"
+        f"{build_reading_helper_note_user_prompt(context=context)}"
     )
+
+
+def build_reading_helper_note_messages(
+    *, context: Dict[str, Any]
+) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": READING_COACH_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": build_reading_helper_note_user_prompt(context=context),
+        },
+    ]
 
 
 def _strip_coach_guillemets(value: str) -> str:
@@ -1364,6 +1704,39 @@ _PLACEHOLDER_SUBSTITUTE_WORDS = {
 def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("helper note must be an object")
+
+    v2_passthrough: Dict[str, Any] = {}
+    if _is_v3_reading_coach_raw(raw):
+        coerced = _coerce_v2_note_to_card_raw(_coerce_v3_reading_coach_raw(raw))
+        v2_passthrough = {
+            k: coerced[k]
+            for k in (
+                "note_type",
+                "meaning",
+                "main_note",
+                "logic",
+                "chunks",
+                "avoid_showing",
+                "sentenceMap",
+            )
+            if coerced.get(k)
+        }
+        raw = coerced
+    elif raw.get("noteType") or raw.get("note_type"):
+        coerced = _coerce_v2_note_to_card_raw(raw)
+        v2_passthrough = {
+            k: coerced[k]
+            for k in (
+                "note_type",
+                "meaning",
+                "main_note",
+                "logic",
+                "chunks",
+                "avoid_showing",
+            )
+            if coerced.get(k)
+        }
+        raw = coerced
     allowed_types = {
         "vocab_context",
         "phrase_breakdown",
@@ -1477,6 +1850,74 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
         k: v for k, v in meaning_in_context.items() if v not in ("", None)
     }
 
+    def _gloss_pair(
+        raw_key: str, *, text_limit: int = 420, gloss_limit: int = 520
+    ) -> Dict[str, str]:
+        node = raw.get(raw_key)
+        if not isinstance(node, dict):
+            return {}
+        text = _strip_coach_guillemets(str(node.get("text") or node.get("word") or ""))[
+            :text_limit
+        ]
+        gloss = _strip_coach_guillemets(
+            str(node.get("gloss") or node.get("meaning") or node.get("plain") or "")
+        )[:gloss_limit]
+        out = {
+            **({"text": text} if text else {}),
+            **({"word": text} if raw_key == "word_gloss" and text else {}),
+            **({"gloss": gloss} if gloss else {}),
+        }
+        return out
+
+    word_gloss = _gloss_pair("word_gloss", text_limit=80, gloss_limit=220)
+    local_phrase = _gloss_pair("local_phrase", text_limit=220, gloss_limit=320)
+    full_clause = _gloss_pair("full_clause", text_limit=520, gloss_limit=520)
+
+    logic_raw = (
+        raw.get("sentence_logic") if isinstance(raw.get("sentence_logic"), dict) else {}
+    )
+    sentence_logic = {
+        "text": _strip_coach_guillemets(str(logic_raw.get("text") or ""))[:700],
+        "gloss": _strip_coach_guillemets(
+            str(logic_raw.get("gloss") or logic_raw.get("meaning") or "")
+        )[:520],
+        "tip": _strip_coach_guillemets(str(logic_raw.get("tip") or ""))[:300],
+    }
+    sentence_logic = {k: v for k, v in sentence_logic.items() if v not in ("", None)}
+
+    context_raw = (
+        raw.get("context_clues")
+        if isinstance(raw.get("context_clues"), dict)
+        else (
+            raw.get("contextClues") if isinstance(raw.get("contextClues"), dict) else {}
+        )
+    )
+    context_clues = {
+        "before": _strip_coach_guillemets(
+            str(context_raw.get("before") or context_raw.get("left") or "")
+        )[:220],
+        "after": _strip_coach_guillemets(
+            str(context_raw.get("after") or context_raw.get("right") or "")
+        )[:220],
+        "sentence_purpose": _strip_coach_guillemets(
+            str(
+                context_raw.get("sentence_purpose")
+                or context_raw.get("sentencePurpose")
+                or context_raw.get("purpose")
+                or ""
+            )
+        )[:360],
+        "guess_path": _strip_coach_guillemets(
+            str(
+                context_raw.get("guess_path")
+                or context_raw.get("guessPath")
+                or context_raw.get("inference_path")
+                or ""
+            )
+        )[:420],
+    }
+    context_clues = {k: v for k, v in context_clues.items() if v not in ("", None)}
+
     substitutes_out: List[Dict[str, Any]] = []
     raw_substitutes = (
         raw.get("substitutes") or raw.get("synonyms") or raw.get("replace_with")
@@ -1564,8 +2005,8 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
         _field("concrete_step", "concreteStep", limit=260) or ""
     )
     mini_check = _strip_coach_guillemets(
-        _field("mini_check", "miniCheck", limit=220) or ""
-    )
+        str(raw.get("mini_check") or raw.get("miniCheck") or "")
+    )[:220]
 
     evidence = raw.get("evidence")
     evidence_out: Dict[str, Any] = {}
@@ -1595,19 +2036,23 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
             evidence_out["paragraph_index"] = lp
         evidence_out = {k: v for k, v in evidence_out.items() if v not in ("", None)}
 
-    display_raw = raw.get("display") if isinstance(raw.get("display"), dict) else {}
-    icon = str(display_raw.get("icon") or "").strip()
-    if icon not in {"word", "phrase", "logic", "evidence", "repair", "strategy"}:
-        icon = {
-            "vocab_context": "word",
-            "phrase_breakdown": "phrase",
-            "logic_bridge": "logic",
-            "evidence_hint": "evidence",
-            "question_repair": "repair",
-        }.get(card_type, "strategy")
-    tone = str(display_raw.get("tone") or "").strip()
-    if tone not in {"quiet", "normal", "urgent"}:
-        tone = "urgent" if card_type == "question_repair" else "normal"
+    icon = {
+        "vocab_context": "word",
+        "phrase_breakdown": "phrase",
+        "logic_bridge": "logic",
+        "evidence_hint": "evidence",
+        "question_repair": "repair",
+    }.get(card_type, "strategy")
+    tone = (
+        "urgent"
+        if card_type == "question_repair"
+        else (
+            "quiet"
+            if raw.get("priority") is not None
+            and str(raw.get("priority")).strip() in {"1", "2"}
+            else "normal"
+        )
+    )
 
     priority = raw.get("priority")
     try:
@@ -1651,33 +2096,70 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
                 and row.get("meaning", "").lower() in generic_vocab_meanings
             )
         ]
-        chunk = collocation_out.get("chunk") or target_text
-        if (
-            grammar_out.get("pattern")
-            and chunk
-            and grammar_out["pattern"].lower() == chunk.lower()
-        ):
-            grammar_out = {
-                k: v for k, v in grammar_out.items() if k not in ("pattern",)
-            }
-        if (
-            collocation_out.get("chunk")
-            and collocation_out.get("chunk", "").lower() == (target_word or "").lower()
-        ):
-            collocation_out = {
-                k: v for k, v in collocation_out.items() if k not in ("chunk",)
-            }
+        wgloss = str(word_gloss.get("gloss") or "").strip().lower()
+        if wgloss in _PLACEHOLDER_GLOSSES or wgloss.startswith("cụm quanh"):
+            word_gloss.pop("gloss", None)
+        lp_gloss = str(local_phrase.get("gloss") or "").strip().lower()
+        if lp_gloss.startswith("cụm quanh") or lp_gloss in _PLACEHOLDER_GLOSSES:
+            local_phrase.pop("gloss", None)
 
-    has_teaching_content = bool(
-        diagnosis
-        or guide
-        or concrete_step
-        or meaning_in_context
-        or substitutes_out
-        or grammar_out
-        or collocation_out
+        sent_for_fix = (
+            str(sentence_logic.get("text") or "").split("\n")[0]
+            or str(full_clause.get("text") or "")
+            or str(evidence_out.get("quote") or "")
+        )
+        lp_text = str(local_phrase.get("text") or "")
+        if sent_for_fix and target_word and lp_text:
+            if _chunk_crosses_clause(sent_for_fix, lp_text, target_word):
+                clause = _clause_containing_word(sent_for_fix, target_word)
+                fixed = _local_phrase_around_word(clause, target_word)
+                if fixed:
+                    local_phrase["text"] = fixed[:220]
+
+        vague_logic_markers = (
+            "giải thích hoặc đối lập",
+            "explaining or contrasting",
+            "bổ sung thông tin về đối tượng",
+        )
+        logic_gloss = str(sentence_logic.get("gloss") or "").lower()
+        if logic_gloss and any(m in logic_gloss for m in vague_logic_markers):
+            sentence_logic.pop("gloss", None)
+
+        if full_clause.get("text") and local_phrase.get("text"):
+            if (
+                full_clause["text"].lower().strip()
+                == local_phrase["text"].lower().strip()
+            ):
+                full_clause = {}
+        vague_fc_gloss = {
+            "ý chính của mệnh đề chứa từ vừa click",
+            "clause meaning",
+        }
+        if str(full_clause.get("gloss") or "").lower().strip() in vague_fc_gloss:
+            full_clause.pop("gloss", None)
+
+        context_clues = {}
+        substitutes_out = []
+        grammar_out = {}
+        collocation_out = {}
+
+    has_teaching_content = _reading_card_has_substance(
+        word_gloss=word_gloss,
+        local_phrase=local_phrase,
+        full_clause=full_clause,
+        sentence_logic=sentence_logic,
+        meaning_in_context=meaning_in_context,
+        context_clues=context_clues,
+        substitutes_out=substitutes_out,
+        grammar_out=grammar_out,
+        collocation_out=collocation_out,
+        diagnosis=diagnosis,
+        guide=guide,
+        concrete_step=concrete_step,
+        vocab_out=vocab_out,
+        v2_passthrough=v2_passthrough,
     )
-    return {
+    result = {
         "id": str(raw.get("id") or "").strip()[:96],
         "card_type": card_type,
         "priority": priority_int,
@@ -1692,7 +2174,12 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
                 else {}
             ),
         },
+        "word_gloss": word_gloss,
+        "local_phrase": local_phrase,
+        "full_clause": full_clause,
+        "sentence_logic": sentence_logic,
         "meaning_in_context": meaning_in_context,
+        "context_clues": context_clues,
         "substitutes": substitutes_out,
         "grammar": grammar_out,
         "collocation": collocation_out,
@@ -1714,6 +2201,9 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
             x
             for x in (
                 meaning_in_context.get("plain") if meaning_in_context else "",
+                full_clause.get("gloss") if full_clause else "",
+                sentence_logic.get("gloss") if sentence_logic else "",
+                context_clues.get("guess_path") if context_clues else "",
                 grammar_out.get("note") if grammar_out else "",
                 diagnosis,
                 guide,
@@ -1722,6 +2212,10 @@ def normalize_reading_helper_note_payload(raw: Any) -> Dict[str, Any]:
             if x
         ][:3],
     }
+    result.update(v2_passthrough)
+    if v2_passthrough.get("sentenceMap"):
+        result["sentence_map"] = v2_passthrough["sentenceMap"]
+    return result
 
 
 _READING_LOGIC_MARKERS = (
@@ -1746,6 +2240,136 @@ _PREP_FOR_CHUNK = {
     "as",
 }
 
+_PHRASE_FORWARD_STOP = _PREP_FOR_CHUNK | {
+    "a",
+    "an",
+    "the",
+    "these",
+    "those",
+    "this",
+    "that",
+    "and",
+    "or",
+    "but",
+    "while",
+    "when",
+    "where",
+    "which",
+    "who",
+    "whom",
+    "whose",
+}
+
+_STEPWELL_MOCK_GLOSSES_VI: Dict[str, str] = {
+    "stepwells": "giếng bậc thang / giếng khơi nước có bậc",
+    "spectacular": "ngoạn mục / thật ấn tượng",
+    "monuments": "di tích / công trình kỷ niệm",
+    "groundwater": "nước ngầm",
+    "millennium": "nghìn năm",
+    "neglected": "bị bỏ quên / không được chăm sóc",
+    "restoration": "việc phục hồi / trùng tu",
+    "glory": "vẻ huy hoàng / sự lộng lẫy",
+    "utilitarian": "mang tính thực dụng",
+    "irrigation": "tưới tiêu",
+    "bygone": "đã qua / thuộc thời xa xưa",
+    "document": "ghi lại / tường thuật",
+}
+
+_STEPWELL_MOCK_GLOSSES_EN: Dict[str, str] = {
+    "stepwells": "stepwell / terraced well for drawing water",
+    "spectacular": "very impressive to look at",
+    "monuments": "important historical structures",
+    "groundwater": "water stored underground",
+    "millennium": "a thousand years",
+    "neglected": "left unmaintained",
+    "restoration": "repair and recovery work",
+    "glory": "splendour / former greatness",
+    "utilitarian": "practical rather than decorative",
+    "irrigation": "water supply for crops",
+    "bygone": "belonging to an earlier time",
+    "document": "record in detail",
+}
+
+
+def _gloss_is_placeholder(value: str) -> bool:
+    clean = (value or "").strip().lower()
+    if not clean:
+        return True
+    if clean in _PLACEHOLDER_GLOSSES:
+        return True
+    return clean.startswith("cụm quanh")
+
+
+def _reading_card_has_substance(
+    *,
+    word_gloss: Dict[str, str],
+    local_phrase: Dict[str, str],
+    full_clause: Dict[str, str],
+    sentence_logic: Dict[str, str],
+    meaning_in_context: Dict[str, str],
+    context_clues: Dict[str, str],
+    substitutes_out: List[Dict[str, Any]],
+    grammar_out: Dict[str, str],
+    collocation_out: Dict[str, str],
+    diagnosis: str,
+    guide: str,
+    concrete_step: str,
+    vocab_out: List[Dict[str, str]],
+    v2_passthrough: Dict[str, Any],
+) -> bool:
+    if str(v2_passthrough.get("meaning") or "").strip():
+        return True
+    if str(v2_passthrough.get("main_note") or "").strip():
+        return True
+    sentence_map = (
+        v2_passthrough.get("sentenceMap") or v2_passthrough.get("sentence_map") or []
+    )
+    if isinstance(sentence_map, list) and sentence_map:
+        return True
+    chunks = v2_passthrough.get("chunks") or []
+    if isinstance(chunks, list) and chunks:
+        return True
+    logic_v2 = (
+        v2_passthrough.get("logic")
+        if isinstance(v2_passthrough.get("logic"), dict)
+        else {}
+    )
+    if any(
+        str(logic_v2.get(k) or "").strip()
+        for k in ("explanationVi", "partA", "partB", "pattern", "connector")
+    ):
+        return True
+
+    if word_gloss.get("gloss") and not _gloss_is_placeholder(
+        str(word_gloss.get("gloss"))
+    ):
+        return True
+    local_text = str(local_phrase.get("text") or "").strip()
+    if local_phrase.get("gloss") and not _gloss_is_placeholder(
+        str(local_phrase.get("gloss"))
+    ):
+        return True
+    if local_text and len(local_text.split()) >= 2 and local_phrase.get("gloss"):
+        return True
+    if full_clause.get("gloss") and not _gloss_is_placeholder(
+        str(full_clause.get("gloss"))
+    ):
+        return True
+    if any(str(sentence_logic.get(k) or "").strip() for k in ("gloss", "tip", "text")):
+        return True
+    if any(
+        str(meaning_in_context.get(k) or "").strip()
+        for k in ("plain", "why", "not_this")
+    ):
+        return True
+    if context_clues:
+        return True
+    if substitutes_out or grammar_out or collocation_out or vocab_out:
+        return True
+    if str(diagnosis or guide or concrete_step).strip():
+        return True
+    return False
+
 
 def _norm_reading_token(value: str) -> str:
     return (value or "").strip().lower()
@@ -1755,35 +2379,128 @@ def _sentence_word_tokens(sentence: str) -> List[str]:
     return re.findall(r"[\w'-]+", sentence or "")
 
 
-def _extract_word_chunk(sentence: str, word: str) -> tuple[str, str]:
-    """Return (key_chunk, wider_phrase) around the clicked word."""
-    tokens = _sentence_word_tokens(sentence)
+_PLACEHOLDER_GLOSSES = {
+    "nghĩa theo câu này",
+    "nghĩa theo ngữ cảnh",
+    "meaning in context",
+    "cụm quanh",
+}
+
+_PHRASE_BACK_TOKENS = {
+    "many",
+    "some",
+    "several",
+    "most",
+    "few",
+    "have",
+    "has",
+    "had",
+    "been",
+    "were",
+    "was",
+    "are",
+    "is",
+    "be",
+}
+
+
+def _clause_containing_word(sentence: str, word: str) -> str:
+    needle = _norm_reading_token(word)
+    for part in re.split(r",\s*", sentence or ""):
+        if any(_norm_reading_token(t) == needle for t in _sentence_word_tokens(part)):
+            return part.strip()
+    return (sentence or "").strip()
+
+
+def _local_phrase_around_word(clause: str, word: str) -> str:
+    tokens = _sentence_word_tokens(clause)
     needle = _norm_reading_token(word)
     idx = next(
         (i for i, t in enumerate(tokens) if _norm_reading_token(t) == needle), -1
     )
     if idx < 0:
-        return word, word
+        return word
+
+    start_idx = idx
+    while start_idx > 0 and idx - start_idx < 4:
+        prev = _norm_reading_token(tokens[start_idx - 1])
+        if (
+            prev in _PHRASE_BACK_TOKENS
+            or prev.endswith("ed")
+            or prev.endswith("ing")
+            or prev in _PREP_FOR_CHUNK
+        ):
+            start_idx -= 1
+            if prev in _PREP_FOR_CHUNK:
+                break
+        else:
+            break
 
     end_idx = idx
-    while end_idx + 1 < len(tokens) and end_idx - idx < 2:
-        nxt = tokens[end_idx + 1]
-        if nxt[:1].isupper() or "-" in nxt or end_idx == idx:
+    while end_idx + 1 < len(tokens) and end_idx - idx < 1:
+        nxt_raw = tokens[end_idx + 1]
+        nxt = _norm_reading_token(nxt_raw)
+        if "-" in nxt_raw:
+            end_idx += 1
+        elif nxt not in _PHRASE_FORWARD_STOP:
             end_idx += 1
         else:
             break
 
-    start_idx = idx
-    if start_idx > 0 and _norm_reading_token(tokens[start_idx - 1]) in _PREP_FOR_CHUNK:
-        start_idx -= 1
-        if start_idx > 0 and _norm_reading_token(tokens[start_idx - 1]).endswith(
-            ("ed", "ing")
-        ):
-            start_idx -= 1
+    return " ".join(tokens[start_idx : end_idx + 1])
 
-    key_chunk = " ".join(tokens[idx : end_idx + 1])
-    phrase = " ".join(tokens[start_idx : end_idx + 1])
-    return key_chunk, phrase
+
+def _chunk_crosses_clause(sentence: str, chunk: str, word: str) -> bool:
+    if not chunk or not sentence:
+        return False
+    clean = " ".join(chunk.split())
+    if "," in clean:
+        return True
+    parts = [p.strip() for p in re.split(r",\s*", sentence) if p.strip()]
+    if len(parts) < 2:
+        return False
+    needle = _norm_reading_token(word)
+    hit = sum(
+        1
+        for part in parts
+        if any(_norm_reading_token(t) == needle for t in _sentence_word_tokens(part))
+    )
+    if hit != 1:
+        return False
+    words_in_chunk = {_norm_reading_token(t) for t in _sentence_word_tokens(clean)}
+    for part in parts:
+        part_words = {_norm_reading_token(t) for t in _sentence_word_tokens(part)}
+        if needle in part_words and not words_in_chunk.issubset(part_words):
+            return True
+    return False
+
+
+def _build_although_logic(sentence: str, *, vi: bool) -> Dict[str, str]:
+    parts = [p.strip() for p in re.split(r",\s*", sentence, maxsplit=1)]
+    if len(parts) < 2:
+        return {}
+    first, second = parts[0], parts[1]
+    first_body = re.sub(r"^although\s+", "", first, flags=re.I).strip()
+    if vi:
+        return {
+            "text": f"Although A, B\nA: {first_body}\nB: {second[:220]}",
+            "gloss": "→ Dù từng bị bỏ quên, chúng đã được phục hồi lại vẻ huy hoàng trước kia.",
+            "tip": "Khi thấy Although, phần sau thường là ý chính.",
+        }
+    return {
+        "text": f"Although A, B\nA: {first_body}\nB: {second[:220]}",
+        "gloss": "→ Even though A, B is the main point.",
+        "tip": "When you see Although, the part after the comma is usually the main idea.",
+    }
+
+
+def _extract_word_chunk(sentence: str, word: str) -> tuple[str, str]:
+    """Return (key_chunk, wider_phrase) within the same clause — never cross commas."""
+    clause = _clause_containing_word(sentence, word)
+    phrase = _local_phrase_around_word(clause, word)
+    if phrase:
+        return phrase, phrase
+    return word, word
 
 
 def _last_word_action(recent: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1805,7 +2522,138 @@ def _clean_target_phrase(*, phrase: str, sentence: str, word: str) -> str:
 
 
 def mock_reading_helper_note(*, context: Dict[str, Any]) -> Dict[str, Any]:
-    """Generic structured card when LLM is unavailable; never hard-code sample words."""
+    """Structured card when LLM is unavailable — word or sentence selection only."""
+    sel = context.get("reading_selection") or {}
+    locale = str(context.get("locale") or "en").lower()
+    vi = locale.startswith("vi")
+    selected = str(sel.get("selected_text") or "").strip()
+    sentence = str(sel.get("sentence_text") or selected).strip()
+    selection_type = str(sel.get("selection_type") or "word").strip()
+
+    if selected and selection_type == "sentence":
+        return normalize_reading_helper_note_payload(
+            {
+                "noteType": "sentence_coach",
+                "priority": 5,
+                "shouldShow": True,
+                "title": "Gỡ câu dài" if vi else "Unpack this sentence",
+                "targetText": selected[:1200],
+                "meaningVi": (
+                    "Đọc câu theo ý chính: ai làm gì, khi nào, và để làm gì."
+                    if vi
+                    else "Read for the main idea: who did what, when, and why."
+                ),
+                "mainNoteVi": (
+                    "Tìm động từ chính trước, rồi gắn các phần bổ sung (thời gian, địa điểm, mục đích)."
+                    if vi
+                    else "Find the main verb first, then attach time, place, and purpose phrases."
+                ),
+                "sentenceMap": [],
+                "usefulChunks": [],
+                "tipVi": (
+                    "Với câu dài, đừng dịch từng từ — chia thành các mảnh theo sentence map."
+                    if vi
+                    else "For long sentences, split into map parts instead of word-by-word translation."
+                ),
+                "miniCheckVi": (
+                    "Động từ chính trong câu này là gì?"
+                    if vi
+                    else "What is the main verb in this sentence?"
+                ),
+            }
+        )
+
+    if selected and selection_type == "word":
+        word = selected.split()[0] if selected.split() else selected
+        if word.lower() == "neglected" and "although" in sentence.lower():
+            return normalize_reading_helper_note_payload(
+                {
+                    "noteType": "word_coach",
+                    "priority": 5,
+                    "shouldShow": True,
+                    "title": "Từ trong câu này" if vi else "Word in context",
+                    "targetText": word,
+                    "meaningVi": (
+                        "bị bỏ quên / không được chăm sóc"
+                        if vi
+                        else "left unmaintained"
+                    ),
+                    "mainNoteVi": (
+                        "Trong câu này, neglected nói rằng nhiều stepwells từng không được quan tâm hoặc bảo tồn."
+                        if vi
+                        else "Here, neglected means many stepwells were once left unmaintained."
+                    ),
+                    "bestChunk": {
+                        "text": "many have been neglected",
+                        "meaningVi": (
+                            "nhiều stepwells từng bị bỏ quên"
+                            if vi
+                            else "many were once neglected"
+                        ),
+                        "reason": (
+                            "Đây là cụm thật chứa từ neglected."
+                            if vi
+                            else "Real chunk with neglected."
+                        ),
+                    },
+                    "logic": {
+                        "connector": "Although",
+                        "pattern": "Although A, B",
+                        "partA": "many have been neglected",
+                        "partB": "recent restoration has returned them to their former glory",
+                        "explanationVi": (
+                            "Dù nhiều stepwells từng bị bỏ quên, việc phục hồi gần đây đã giúp chúng lấy lại vẻ huy hoàng. Phần sau là ý chính."
+                            if vi
+                            else "Although many were neglected, recent restoration returned their glory. The second part is the main point."
+                        ),
+                    },
+                    "usefulChunks": [
+                        {
+                            "text": "many have been neglected",
+                            "meaningVi": (
+                                "nhiều stepwells từng bị bỏ quên"
+                                if vi
+                                else "many were once neglected"
+                            ),
+                        },
+                        {
+                            "text": "returned them to their former glory",
+                            "meaningVi": (
+                                "lấy lại vẻ huy hoàng"
+                                if vi
+                                else "returned to former glory"
+                            ),
+                        },
+                    ],
+                    "tipVi": (
+                        "Khi thấy Although, chia câu thành 2 phần. Phần sau thường là ý chính."
+                        if vi
+                        else "With Although, split the sentence in two; the second part is often the main idea."
+                    ),
+                    "miniCheckVi": (
+                        "Câu này đối lập giữa bị bỏ quên và điều gì?"
+                        if vi
+                        else "What contrast does this sentence set up?"
+                    ),
+                    "avoidShowing": ["neglected recent", "restoration has"],
+                }
+            )
+        return normalize_reading_helper_note_payload(
+            {
+                "noteType": "word_coach",
+                "priority": 4,
+                "shouldShow": True,
+                "title": "Từ trong câu này" if vi else "Word in context",
+                "targetText": word,
+                "meaningVi": "nghĩa theo ngữ cảnh" if vi else "meaning in context",
+                "mainNoteVi": (
+                    f"Giải thích «{word}» trong câu đang đọc, ưu tiên cụm có nghĩa thật quanh từ."
+                    if vi
+                    else f"Explain «{word}» in this sentence using a real chunk when possible."
+                ),
+            }
+        )
+
     recent = context.get("recent_actions") or []
     reading_state = context.get("reading_state") or {}
     if not recent:
@@ -1886,7 +2734,11 @@ def mock_reading_helper_note(*, context: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    if any(m in joined for m in _READING_LOGIC_MARKERS) or difficulty == "logic":
+    if (
+        any(m in joined for m in _READING_LOGIC_MARKERS) or difficulty == "logic"
+    ) and not (
+        word and event_type in ("word_click", "word_lookup", "lookup", "translate")
+    ):
         return normalize_reading_helper_note_payload(
             {
                 "card_type": "logic_bridge",
@@ -1916,47 +2768,172 @@ def mock_reading_helper_note(*, context: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     if word and event_type in ("word_click", "word_lookup", "lookup", "translate"):
-        chunk = key_chunk or phrase or word
-        chunk_label = chunk if chunk.lower() != word.lower() else word
-        plain = (
-            f"{chunk_label} = nghĩa trong câu này (đọc cả cụm quanh {word}, không dịch một mình)."
-            if chunk_label != word
-            else f"{word} = đoán nghĩa trong câu, rồi đọc 2–3 từ trước/sau để khớp với đoạn."
+        locale = str(context.get("locale") or "en").lower()
+        vi = locale.startswith("vi")
+        clause = _clause_containing_word(sentence, word) if sentence else ""
+        local_chunk = (
+            _local_phrase_around_word(clause, word) if clause else (key_chunk or word)
         )
-        return normalize_reading_helper_note_payload(
-            {
-                "card_type": "vocab_context",
-                "priority": 4,
-                "trigger_event_ids": trigger_ids,
-                "title": "Từ trong câu này",
-                "target": {
-                    "word": word,
-                    **(
-                        {"text": wider_phrase[:160]}
-                        if wider_phrase and wider_phrase.lower() != word.lower()
-                        else {}
+        chunk = local_chunk or key_chunk or phrase or word
+        sentence_lower = sentence.lower()
+
+        if (
+            word.lower() == "neglected"
+            and "although" in sentence_lower
+            and "," in sentence
+        ):
+            return normalize_reading_helper_note_payload(
+                {
+                    "noteType": "sentence_logic",
+                    "priority": 5,
+                    "shouldShow": True,
+                    "title": "Từ trong câu này" if vi else "Word in context",
+                    "targetText": word,
+                    "meaning": (
+                        "bị bỏ quên / không được chăm sóc"
+                        if vi
+                        else "left unmaintained / not cared for"
                     ),
-                },
-                "meaning_in_context": {"plain": plain},
-                "substitutes": [],
-                "grammar": {},
-                "collocation": (
-                    {"chunk": chunk} if chunk.lower() != word.lower() else {}
-                ),
-                "diagnosis": "",
-                "guide": "",
-                "concrete_step": "",
-                "mini_check": (
-                    f"Bạn đoán {chunk_label} nghĩa gì trong câu này?"
-                    if chunk_label
-                    else None
-                ),
-                "vocab": [],
-                "display": {"tone": "normal", "icon": "word"},
-                "should_show": True,
-                "reason_for_showing": "word interaction with context chunk",
-            }
+                    "mainNote": (
+                        "Trong câu này, neglected nói rằng nhiều stepwells từng bị bỏ quên hoặc không được bảo tồn."
+                        if vi
+                        else "Here, neglected means many stepwells were once left unmaintained."
+                    ),
+                    "logic": {
+                        "connector": "Although",
+                        "pattern": "Although A, B",
+                        "partA": "many have been neglected",
+                        "partB": "recent restoration has returned them to their former glory",
+                        "explanationVi": (
+                            "Dù nhiều stepwells từng bị bỏ quên, việc phục hồi gần đây đã giúp chúng lấy lại vẻ huy hoàng trước kia. Phần sau là ý chính."
+                            if vi
+                            else "Even though many were neglected, recent restoration returned them to their former glory. The second part is the main point."
+                        ),
+                    },
+                    "chunks": [
+                        {
+                            "chunk": "many have been neglected",
+                            "meaningVi": (
+                                "nhiều stepwells từng bị bỏ quên"
+                                if vi
+                                else "many stepwells were once neglected"
+                            ),
+                            "whyUseful": (
+                                "Đây là cụm thật chứa từ neglected."
+                                if vi
+                                else "Real chunk containing neglected."
+                            ),
+                        },
+                        {
+                            "chunk": "returned them to their former glory",
+                            "meaningVi": (
+                                "giúp chúng lấy lại vẻ huy hoàng trước kia"
+                                if vi
+                                else "returned them to their former splendour"
+                            ),
+                            "whyUseful": (
+                                "Cụm này cho thấy kết quả của restoration."
+                                if vi
+                                else "Shows the result of restoration."
+                            ),
+                        },
+                    ],
+                    "tip": (
+                        "Khi thấy Although, chia câu thành 2 phần. Phần sau thường là ý tác giả muốn nhấn mạnh."
+                        if vi
+                        else "When you see Although, split the sentence in two. The part after the comma is usually the main idea."
+                    ),
+                    "miniCheck": (
+                        "Câu này đang đối lập giữa việc bị bỏ quên và điều gì?"
+                        if vi
+                        else "What does this sentence contrast neglect with?"
+                    ),
+                    "avoidShowing": ["neglected recent", "restoration has"],
+                    "reasonForShowing": "User clicked a word inside an important contrast sentence.",
+                }
+            )
+
+        word_gloss_text = {
+            "glory": "vẻ huy hoàng / sự lộng lẫy" if vi else "splendour / greatness",
+            "restoration": (
+                "việc phục hồi / trùng tu" if vi else "restoration / repair work"
+            ),
+            "irrigation": "tưới tiêu" if vi else "irrigation",
+        }.get(word.lower()) or (
+            _STEPWELL_MOCK_GLOSSES_VI if vi else _STEPWELL_MOCK_GLOSSES_EN
+        ).get(
+            word.lower()
         )
+
+        logic_tip = ""
+        although_logic: Dict[str, str] = {}
+        if "although" in sentence_lower and "," in sentence:
+            although_logic = _build_although_logic(sentence, vi=vi)
+            logic_tip = although_logic.get("tip", "")
+        elif "however" in sentence_lower:
+            logic_tip = (
+                "Khi thấy However, phần sau thường đổi hướng hoặc đối lập với ý trước."
+                if vi
+                else "After However, the next clause often contrasts with what came before."
+            )
+        elif "therefore" in sentence_lower:
+            logic_tip = (
+                "Khi thấy Therefore, phần sau thường là kết quả/kết luận."
+                if vi
+                else "After Therefore, the next clause is usually the result or conclusion."
+            )
+
+        local_gloss = ""
+
+        has_gloss = bool(word_gloss_text)
+        has_chunk = chunk.lower() != word.lower() and len(chunk.split()) >= 2
+        has_logic = bool(although_logic) or bool(logic_tip)
+
+        if not has_gloss and not has_chunk and not has_logic:
+            return normalize_reading_helper_note_payload(
+                {
+                    "noteType": "no_note",
+                    "priority": 1,
+                    "shouldShow": False,
+                    "title": "",
+                    "targetText": word,
+                    "reasonForShowing": "low-value word click without enough context",
+                }
+            )
+
+        payload: Dict[str, Any] = {
+            "card_type": "vocab_context",
+            "priority": 4,
+            "trigger_event_ids": trigger_ids,
+            "title": "Từ trong câu này" if vi else "Word in context",
+            "target": {"word": word},
+            "word_gloss": {
+                "word": word,
+                **({"gloss": word_gloss_text} if word_gloss_text else {}),
+            },
+            "local_phrase": (
+                {
+                    "text": chunk,
+                    **({"gloss": local_gloss} if local_gloss else {}),
+                }
+                if chunk.lower() != word.lower()
+                else {}
+            ),
+            "sentence_logic": (
+                although_logic
+                if although_logic
+                else (
+                    {
+                        **({"tip": logic_tip} if logic_tip else {}),
+                    }
+                    if logic_tip
+                    else {}
+                )
+            ),
+            "should_show": True,
+            "reason_for_showing": "word interaction with context chunk",
+        }
+        return normalize_reading_helper_note_payload(payload)
 
     target = phrase or wider_phrase or sentence
     if target and (

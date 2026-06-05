@@ -28,7 +28,7 @@ from aiforen.domain.vocab_coaching_reading import (
 )
 from aiforen.integrations.llm import get_llm_provider
 from aiforen.integrations.llm.json_utils import (
-    build_reading_helper_note_prompt,
+    build_reading_helper_note_messages,
     build_reading_helper_prompt,
     extract_json,
     mock_reading_helper_note,
@@ -37,6 +37,10 @@ from aiforen.integrations.llm.json_utils import (
     normalize_reading_explain_payload,
     normalize_reading_helper_note_payload,
     normalize_reading_questions_payload,
+)
+from aiforen.integrations.llm.openai_chat import (
+    openai_chat_completion_stream,
+    openai_chat_completion_text,
 )
 from aiforen.integrations.translate import get_translate_client
 from aiforen.repositories.pg.user_stats import VN_TZ, UserStatsRepo
@@ -698,17 +702,14 @@ class VocabCoachingService:
                 from openai import AsyncOpenAI
 
                 client = AsyncOpenAI(api_key=api_key)
-                stream = await client.chat.completions.create(
+                async for delta in openai_chat_completion_stream(
+                    client,
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
+                    max_output_tokens=700,
                     temperature=0.35,
-                    max_tokens=700,
-                    stream=True,
-                )
-                async for chunk in stream:
-                    delta = chunk.choices[0].delta.content or ""
-                    if delta:
-                        yield delta
+                ):
+                    yield delta
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.warning("coaching helper OpenAI stream failed: {}", exc)
@@ -726,6 +727,7 @@ class VocabCoachingService:
         locale: str = "en",
         paragraph_index: int = 0,
         visible_paragraph_indexes: Optional[Sequence[int]] = None,
+        reading_selection: Optional[Dict[str, Any]] = None,
         reading_state: Optional[Dict[str, Any]] = None,
         recent_actions: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
@@ -754,15 +756,17 @@ class VocabCoachingService:
         )
         context = {
             "locale": locale,
-            "level": plan.cefr_level,
-            "title": reading.get("title"),
+            "level": (reading_selection or {}).get("user_level") or plan.cefr_level,
+            "title": (reading_selection or {}).get("passage_title")
+            or reading.get("title"),
             "paragraphs": para_payload,
             "visible_paragraph_indexes": visible,
+            "reading_selection": reading_selection or {},
             "reading_state": reading_state or {},
             "recent_actions": recent,
             **action_context,
         }
-        prompt = build_reading_helper_note_prompt(context=context)
+        messages = build_reading_helper_note_messages(context=context)
         settings = get_settings()
         api_key = settings.openai_api_key or ""
         model = settings.openai_vocab_eval_model or settings.openai_model
@@ -772,29 +776,22 @@ class VocabCoachingService:
                 from openai import AsyncOpenAI
 
                 client = AsyncOpenAI(api_key=api_key)
-                resp = await client.chat.completions.create(
+                raw = await openai_chat_completion_text(
+                    client,
                     model=model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
+                    max_output_tokens=900,
                     temperature=0.3,
-                    max_tokens=900,
                     response_format={"type": "json_object"},
                 )
-                raw = (resp.choices[0].message.content or "").strip()
                 if raw:
                     card = normalize_reading_helper_note_payload(extract_json(raw))
-                    feed = self._append_reading_coach_card(day, card)
-                    await self.s.flush()
-                    return {
-                        "card": card if card.get("should_show") else None,
-                        "feed": feed,
-                    }
+                    return self._reading_coach_card_response(card)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("coaching helper note OpenAI failed: {}", exc)
 
         card = mock_reading_helper_note(context=context)
-        feed = self._append_reading_coach_card(day, card)
-        await self.s.flush()
-        return {"card": card if card.get("should_show") else None, "feed": feed}
+        return self._reading_coach_card_response(card)
 
     # =============================================================== translate
     async def translate_text(
@@ -942,7 +939,6 @@ class VocabCoachingService:
             "reading_total": reading_total,
             "recall_correct": recall_correct,
             "recall_total": recall_total,
-            "reading_coach_feed": (day.analysis or {}).get("reading_coach_feed") or [],
             **signals,
         }
         try:
@@ -1022,39 +1018,13 @@ class VocabCoachingService:
         digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
         return f"rcc-{digest}"
 
-    def _append_reading_coach_card(
-        self, day: Optional[VocabCoachingDay], card: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        if day is None:
-            return []
-        analysis = dict(day.analysis or {})
-        feed = [
-            row
-            for row in analysis.get("reading_coach_feed") or []
-            if isinstance(row, dict)
-        ]
+    def _reading_coach_card_response(self, card: Dict[str, Any]) -> Dict[str, Any]:
         if not card.get("should_show"):
-            return feed
+            return {"card": None, "feed": []}
         card = dict(card)
         card["id"] = card.get("id") or self._coach_card_id(card)
         card.setdefault("created_at", datetime.now(timezone.utc).isoformat())
-        signature = (
-            card.get("card_type"),
-            tuple(card.get("trigger_event_ids") or []),
-            ((card.get("target") or {}).get("text") or "").strip().lower(),
-        )
-        for existing in feed:
-            existing_signature = (
-                existing.get("card_type"),
-                tuple(existing.get("trigger_event_ids") or []),
-                ((existing.get("target") or {}).get("text") or "").strip().lower(),
-            )
-            if existing.get("id") == card["id"] or existing_signature == signature:
-                return feed
-        feed = [*feed, card][-30:]
-        analysis["reading_coach_feed"] = feed
-        day.analysis = analysis
-        return feed
+        return {"card": card, "feed": [card]}
 
     def _event_to_helper_action(self, event) -> Dict[str, Any]:
         payload = event.payload or {}

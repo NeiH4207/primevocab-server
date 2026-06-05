@@ -19,6 +19,13 @@ def _should_retry_token_param(exc: Exception) -> bool:
     )
 
 
+def _should_retry_temperature(exc: Exception) -> bool:
+    err = str(exc).lower()
+    return "temperature" in err and (
+        "unsupported" in err or "default" in err or "only the default" in err
+    )
+
+
 async def openai_chat_completion_text(
     client: Any,
     *,
@@ -36,15 +43,30 @@ async def openai_chat_completion_text(
         kwargs["response_format"] = response_format
 
     last_exc: Optional[Exception] = None
-    for token_kwargs in _token_limit_attempts(max_output_tokens):
-        try:
-            resp = await client.chat.completions.create(**kwargs, **token_kwargs)
-            return (resp.choices[0].message.content or "").strip()
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if _should_retry_token_param(exc):
-                continue
-            raise
+    temperature_attempts: List[Optional[float]] = [temperature]
+    if temperature is not None:
+        temperature_attempts.append(None)
+
+    for temp in temperature_attempts:
+        call_kwargs = dict(kwargs)
+        if temp is None:
+            call_kwargs.pop("temperature", None)
+        else:
+            call_kwargs["temperature"] = temp
+
+        for token_kwargs in _token_limit_attempts(max_output_tokens):
+            try:
+                resp = await client.chat.completions.create(
+                    **call_kwargs, **token_kwargs
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if _should_retry_token_param(exc):
+                    continue
+                if temp is not None and _should_retry_temperature(exc):
+                    break
+                raise
 
     if last_exc is not None:
         raise last_exc
@@ -65,19 +87,34 @@ async def openai_chat_completion_stream(
         kwargs["temperature"] = temperature
 
     last_exc: Optional[Exception] = None
-    for token_kwargs in _token_limit_attempts(max_output_tokens):
-        try:
-            stream = await client.chat.completions.create(**kwargs, **token_kwargs)
-            async for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                if delta:
-                    yield delta
-            return
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if _should_retry_token_param(exc):
-                continue
-            raise
+    temperature_attempts: List[Optional[float]] = [temperature]
+    if temperature is not None:
+        temperature_attempts.append(None)
+
+    for temp in temperature_attempts:
+        call_kwargs = dict(kwargs)
+        if temp is None:
+            call_kwargs.pop("temperature", None)
+        else:
+            call_kwargs["temperature"] = temp
+
+        for token_kwargs in _token_limit_attempts(max_output_tokens):
+            try:
+                stream = await client.chat.completions.create(
+                    **call_kwargs, **token_kwargs
+                )
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        yield delta
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if _should_retry_token_param(exc):
+                    continue
+                if temp is not None and _should_retry_temperature(exc):
+                    break
+                raise
 
     if last_exc is not None:
         raise last_exc

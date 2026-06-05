@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
+from aiforen.core.config import get_settings
+
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
@@ -947,10 +949,8 @@ class LearningService:
             return True
         if not last_studied:
             return False
-        if isinstance(last_studied, datetime):
-            studied = last_studied
-            if studied.tzinfo is None:
-                studied = studied.replace(tzinfo=ZoneInfo("UTC"))
+        studied = self._as_utc(last_studied)
+        if studied:
             vn_day = studied.astimezone(VN_TZ).date().isoformat()
             if vn_day in self._today_keys():
                 return True
@@ -1202,10 +1202,8 @@ class LearningService:
         """Per-day vocab mistakes for heatmap tooltips."""
         return vocab_mistakes_from_daily_activity(stats.get("daily_activity") or {})
 
-    def _as_utc(self, dt: datetime) -> datetime:
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=ZoneInfo("UTC"))
-        return dt.astimezone(ZoneInfo("UTC"))
+    def _as_utc(self, dt: Any) -> Optional[datetime]:
+        return _as_utc_aware(dt)
 
     def _is_vocab_mastered_item(self, progress: Dict[str, Any]) -> bool:
         return bool(
@@ -1213,10 +1211,10 @@ class LearningService:
         )
 
     def _progress_learned_by(self, progress: Dict[str, Any], end_dt: datetime) -> bool:
-        first = progress.get("first_studied")
-        if isinstance(first, datetime):
-            if self._as_utc(first) > self._as_utc(end_dt):
-                return False
+        first = self._as_utc(progress.get("first_studied"))
+        end = self._as_utc(end_dt)
+        if first and end and first > end:
+            return False
         try:
             if float(progress.get("mastery_point_pct") or 0) > 0:
                 return True
@@ -1232,15 +1230,14 @@ class LearningService:
             or progress.get("updated_at")
             or progress.get("first_studied")
         )
-        if not isinstance(marker, datetime):
+        marker_dt = self._as_utc(marker)
+        end = self._as_utc(end_dt)
+        if not marker_dt or not end:
             return False
-        return self._as_utc(marker) <= self._as_utc(end_dt)
+        return marker_dt <= end
 
     def _first_studied_utc(self, progress: Dict[str, Any]) -> Optional[datetime]:
-        first = progress.get("first_studied")
-        if not isinstance(first, datetime):
-            return None
-        return self._as_utc(first)
+        return self._as_utc(progress.get("first_studied"))
 
     def _progress_in_week_by(
         self, progress: Dict[str, Any], end_dt: datetime, week_start_utc: datetime
@@ -1449,11 +1446,9 @@ class LearningService:
         for item in progress:
             if not self._is_vocab_mastered_item(item):
                 continue
-            marker = item.get("last_studied") or item.get("updated_at")
-            if not isinstance(marker, datetime):
+            marker = self._as_utc(item.get("last_studied") or item.get("updated_at"))
+            if not marker:
                 continue
-            if marker.tzinfo is None:
-                marker = marker.replace(tzinfo=ZoneInfo("UTC"))
             if marker >= week_start_utc:
                 mastered_this_week += 1
 
@@ -3510,6 +3505,15 @@ class LearningService:
             provider_name = (
                 provider.__class__.__name__.replace("LLMProvider", "").lower() or "llm"
             )
+            settings = get_settings()
+            if provider_name == "openai":
+                model_name = settings.openai_vocab_eval_model or settings.openai_model
+            elif provider_name == "anthropic":
+                model_name = (
+                    settings.anthropic_vocab_eval_model or settings.anthropic_model
+                )
+            elif provider_name == "mock":
+                model_name = "mock"
             raw = await provider.generate_vocab_daily_mission(context=context)
             mission = normalize_vocab_daily_mission_payload(raw, context=context)
             if use_word_tasks:
@@ -3887,7 +3891,7 @@ class LearningService:
                 progress.get("last_seen_date"), progress.get("last_studied")
             ):
                 continue
-            locked_until = progress.get("failed_locked_until") if progress else None
+            locked_until = _as_utc_aware((progress or {}).get("failed_locked_until"))
             if locked_until and locked_until > now:
                 continue
             next_review = _as_utc_aware(

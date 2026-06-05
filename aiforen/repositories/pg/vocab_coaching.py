@@ -8,13 +8,15 @@ coaching service.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aiforen.domain.sql_models import (
+    ReadingCoachNoteCache,
     VocabCoachingDay,
     VocabCoachingEvent,
     VocabCoachingPlan,
@@ -256,6 +258,63 @@ class VocabCoachingRepo:
                 break
         return out
 
+    async def lexemes_for_lemmas(
+        self,
+        lemmas: Sequence[str],
+        *,
+        limit: int = 40,
+        require_quiz: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Return quiz-ready lexeme briefs in the same rough order as input lemmas."""
+        unique: List[str] = []
+        seen: set[str] = set()
+        for lemma in lemmas:
+            clean = str(lemma or "").strip().lower()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            unique.append(clean)
+            if len(unique) >= max(limit * 2, limit):
+                break
+        if not unique:
+            return []
+
+        stmt = select(VocabLexeme).where(
+            VocabLexeme.status.in_(_USABLE_LEXEME_STATUS),
+            (
+                func.lower(VocabLexeme.lemma).in_(tuple(unique))
+                | func.lower(VocabLexeme.display_word).in_(tuple(unique))
+            ),
+        )
+        if require_quiz:
+            stmt = stmt.where(
+                exists(
+                    select(1).where(
+                        VocabQuestion.lexeme_id == VocabLexeme.id,
+                        VocabQuestion.status.in_(_USABLE_QUESTION_STATUS),
+                    )
+                )
+            )
+        rows = list((await self.s.execute(stmt)).scalars().all())
+        by_key: Dict[str, VocabLexeme] = {}
+        for lexeme in rows:
+            for key in (lexeme.lemma, lexeme.display_word):
+                clean = str(key or "").strip().lower()
+                if clean and clean not in by_key:
+                    by_key[clean] = lexeme
+
+        out: List[Dict[str, Any]] = []
+        emitted: set[uuid.UUID] = set()
+        for lemma in unique:
+            lexeme = by_key.get(lemma)
+            if lexeme is None or lexeme.id in emitted:
+                continue
+            emitted.add(lexeme.id)
+            out.append(await self._lexeme_brief(lexeme))
+            if len(out) >= limit:
+                break
+        return out
+
     async def _lexeme_brief(self, lexeme: VocabLexeme) -> Dict[str, Any]:
         sense = (
             await self.s.execute(
@@ -394,3 +453,66 @@ class VocabCoachingRepo:
             "cambridge_link": f"https://dictionary.cambridge.org/dictionary/english/{cleaned}",
             "dictionary_link": f"https://www.lexico.com/en/definition/{cleaned}",
         }
+
+    # -------------------------------------------------------- reading coach cache
+    async def fetch_reading_coach_cache_and_hit(
+        self, cache_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return cached card JSON and increment hit_count atomically."""
+        result = await self.s.execute(
+            update(ReadingCoachNoteCache)
+            .where(ReadingCoachNoteCache.cache_key == cache_key)
+            .values(
+                hit_count=ReadingCoachNoteCache.hit_count + 1,
+                updated_at=datetime.now(timezone.utc),
+            )
+            .returning(ReadingCoachNoteCache.card_json)
+        )
+        row = result.first()
+        if not row:
+            return None
+        card_json = row[0]
+        return dict(card_json) if isinstance(card_json, dict) else None
+
+    async def upsert_reading_coach_cache(
+        self,
+        *,
+        cache_key: str,
+        reading_id: str,
+        selection_type: str,
+        target_text: str,
+        sentence_text: str,
+        locale: str,
+        user_level: str,
+        prompt_version: str,
+        model_name: str,
+        card_json: Dict[str, Any],
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        values = {
+            "cache_key": cache_key,
+            "reading_id": reading_id,
+            "selection_type": selection_type,
+            "target_text": target_text,
+            "sentence_text": sentence_text,
+            "locale": locale,
+            "user_level": user_level,
+            "prompt_version": prompt_version,
+            "model_name": model_name,
+            "card_json": card_json,
+            "hit_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        stmt = pg_insert(ReadingCoachNoteCache).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ReadingCoachNoteCache.cache_key],
+            set_={
+                "card_json": card_json,
+                "model_name": model_name,
+                "prompt_version": prompt_version,
+                "updated_at": now,
+            },
+        )
+        await self.s.execute(stmt)
+        await self.s.flush()

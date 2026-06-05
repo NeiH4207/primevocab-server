@@ -429,3 +429,33 @@ async def _repair_vocab_coaching(conn) -> None:
             )
         )
         logger.info("schema_repair: created vocab_coaching_events")
+
+    if not await _table_exists(conn, "reading_coach_note_cache"):
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE reading_coach_note_cache (
+                  cache_key VARCHAR(64) PRIMARY KEY,
+                  reading_id VARCHAR(128) NOT NULL,
+                  selection_type VARCHAR(16) NOT NULL,
+                  target_text TEXT NOT NULL,
+                  sentence_text TEXT NOT NULL,
+                  locale VARCHAR(8) NOT NULL,
+                  user_level VARCHAR(8) NOT NULL,
+                  prompt_version VARCHAR(16) NOT NULL,
+                  model_name VARCHAR(128) NOT NULL,
+                  card_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  hit_count INTEGER NOT NULL DEFAULT 0,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX ix_reading_coach_cache_lookup "
+                "ON reading_coach_note_cache (reading_id, selection_type, locale, user_level)"
+            )
+        )
+        logger.info("schema_repair: created reading_coach_note_cache")

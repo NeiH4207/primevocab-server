@@ -18,6 +18,11 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 from loguru import logger
 
 from aiforen.core.config import get_settings
+from aiforen.domain.reading_coach_cache import (
+    READING_COACH_PROMPT_VERSION,
+    cache_key_from_selection,
+    is_cacheable_reading_coach_card,
+)
 from aiforen.domain.sql_models import VocabCoachingDay, VocabCoachingPlan
 from aiforen.domain.vocab_coaching_reading import (
     CURATED_DIFFICULT_WORDS,
@@ -1291,6 +1296,32 @@ class VocabCoachingService:
         api_key = settings.openai_api_key or ""
         model = settings.openai_vocab_eval_model or settings.openai_model
 
+        cache_bundle = cache_key_from_selection(
+            reading=reading,
+            reading_selection=reading_selection,
+            locale=locale,
+            user_level=str(
+                (reading_selection or {}).get("user_level") or plan.cefr_level
+            ),
+            model_name=model,
+        )
+        if cache_bundle:
+            cache_key, cache_parts = cache_bundle
+            cached_card = await self.repo.fetch_reading_coach_cache_and_hit(cache_key)
+            if cached_card:
+                logger.info(
+                    "reading_coach_cache hit cache_key={} reading_id={} selection_type={}",
+                    cache_key,
+                    cache_parts.get("reading_id"),
+                    cache_parts.get("selection_type"),
+                )
+                return self._reading_coach_card_response(cached_card)
+            logger.info(
+                "reading_coach_cache miss cache_key={} reading_id={}",
+                cache_key,
+                cache_parts.get("reading_id"),
+            )
+
         if api_key:
             try:
                 from openai import AsyncOpenAI
@@ -1306,6 +1337,30 @@ class VocabCoachingService:
                 )
                 if raw:
                     card = normalize_reading_helper_note_payload(extract_json(raw))
+                    if cache_bundle and is_cacheable_reading_coach_card(card):
+                        cache_key, cache_parts = cache_bundle
+                        sel = reading_selection or {}
+                        await self.repo.upsert_reading_coach_cache(
+                            cache_key=cache_key,
+                            reading_id=str(cache_parts.get("reading_id") or ""),
+                            selection_type=str(cache_parts.get("selection_type") or ""),
+                            target_text=str(sel.get("selected_text") or "")[:1200],
+                            sentence_text=str(
+                                sel.get("sentence_text")
+                                or sel.get("selected_text")
+                                or ""
+                            )[:1200],
+                            locale=str(cache_parts.get("locale") or "en"),
+                            user_level=str(cache_parts.get("user_level") or "B1"),
+                            prompt_version=READING_COACH_PROMPT_VERSION,
+                            model_name=model,
+                            card_json=card,
+                        )
+                        logger.info(
+                            "reading_coach_cache stored cache_key={} reading_id={}",
+                            cache_key,
+                            cache_parts.get("reading_id"),
+                        )
                     return self._reading_coach_card_response(card)
                 logger.warning(
                     "coaching helper note OpenAI returned empty content model={}",

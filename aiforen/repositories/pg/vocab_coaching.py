@@ -8,13 +8,15 @@ coaching service.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aiforen.domain.sql_models import (
+    ReadingCoachNoteCache,
     VocabCoachingDay,
     VocabCoachingEvent,
     VocabCoachingPlan,
@@ -451,3 +453,66 @@ class VocabCoachingRepo:
             "cambridge_link": f"https://dictionary.cambridge.org/dictionary/english/{cleaned}",
             "dictionary_link": f"https://www.lexico.com/en/definition/{cleaned}",
         }
+
+    # -------------------------------------------------------- reading coach cache
+    async def fetch_reading_coach_cache_and_hit(
+        self, cache_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return cached card JSON and increment hit_count atomically."""
+        result = await self.s.execute(
+            update(ReadingCoachNoteCache)
+            .where(ReadingCoachNoteCache.cache_key == cache_key)
+            .values(
+                hit_count=ReadingCoachNoteCache.hit_count + 1,
+                updated_at=datetime.now(timezone.utc),
+            )
+            .returning(ReadingCoachNoteCache.card_json)
+        )
+        row = result.first()
+        if not row:
+            return None
+        card_json = row[0]
+        return dict(card_json) if isinstance(card_json, dict) else None
+
+    async def upsert_reading_coach_cache(
+        self,
+        *,
+        cache_key: str,
+        reading_id: str,
+        selection_type: str,
+        target_text: str,
+        sentence_text: str,
+        locale: str,
+        user_level: str,
+        prompt_version: str,
+        model_name: str,
+        card_json: Dict[str, Any],
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        values = {
+            "cache_key": cache_key,
+            "reading_id": reading_id,
+            "selection_type": selection_type,
+            "target_text": target_text,
+            "sentence_text": sentence_text,
+            "locale": locale,
+            "user_level": user_level,
+            "prompt_version": prompt_version,
+            "model_name": model_name,
+            "card_json": card_json,
+            "hit_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        stmt = pg_insert(ReadingCoachNoteCache).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ReadingCoachNoteCache.cache_key],
+            set_={
+                "card_json": card_json,
+                "model_name": model_name,
+                "prompt_version": prompt_version,
+                "updated_at": now,
+            },
+        )
+        await self.s.execute(stmt)
+        await self.s.flush()

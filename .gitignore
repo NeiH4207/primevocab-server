@@ -195,6 +195,7 @@ debug_*.py
 *_test.py
 *.test
 !tests/vocab_workout_test.py
+!tests/test_vocab_coaching.py
 
 # Temporary files
 tmp/

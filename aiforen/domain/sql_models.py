@@ -1330,6 +1330,44 @@ class VocabCoachingEvent(Base):
     )
 
 
+class ReadingCoachNoteCache(Base):
+    """Shared LLM cards for word/sentence Reading Coach selections."""
+
+    __tablename__ = "reading_coach_note_cache"
+    __table_args__ = (
+        Index(
+            "ix_reading_coach_cache_lookup",
+            "reading_id",
+            "selection_type",
+            "locale",
+            "user_level",
+        ),
+    )
+
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    reading_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    selection_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_text: Mapped[str] = mapped_column(Text, nullable=False)
+    sentence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    locale: Mapped[str] = mapped_column(String(8), nullable=False)
+    user_level: Mapped[str] = mapped_column(String(8), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    card_json: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Writing (Postgres-only; formerly Mongo)
 # ---------------------------------------------------------------------------

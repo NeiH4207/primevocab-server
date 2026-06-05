@@ -13,7 +13,12 @@ import random
 from typing import Any, AsyncIterator, Dict, List
 
 from .base import EvaluationStreamEvent, LLMProvider
-from .json_utils import normalize_vocab_eval_payload
+from .json_utils import (
+    normalize_coaching_notes_payload,
+    normalize_reading_explain_payload,
+    normalize_reading_questions_payload,
+    normalize_vocab_eval_payload,
+)
 
 _CRITERIA_ORDER = [
     ("task_achievement", "Task Achievement"),
@@ -189,6 +194,117 @@ class MockLLMProvider(LLMProvider):
                 },
             ],
         }
+
+    async def explain_reading_phrase(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        phrase = str(context.get("phrase") or "").strip()
+        sentence = str(context.get("sentence") or "").strip()
+        level = str(context.get("level") or "B1")
+        head = phrase.split()[0] if phrase.split() else phrase
+        return normalize_reading_explain_payload(
+            {
+                "explanation": (
+                    f'"{phrase}" works as one idea here. In the sentence "{sentence}", '
+                    f"it links the key word to the writer's point rather than standing alone. "
+                    f"At {level}, try saying it in your own words first."
+                ),
+                "paraphrase": f"in other words: {phrase.lower()}",
+                "vocab_notes": [f"Focus word: {head}"] if head else [],
+            },
+            phrase=phrase,
+            sentence=sentence,
+            level=level,
+        )
+
+    async def generate_reading_questions(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        count = int(context.get("count") or 4)
+        words: List[str] = []
+        for key in ("looked_up_words", "bolded_words", "difficult_words"):
+            for item in context.get(key) or []:
+                token = item.get("word") if isinstance(item, dict) else item
+                token = str(token or "").strip()
+                if token and token not in words:
+                    words.append(token)
+        questions: List[Dict[str, Any]] = []
+        for word in words[:count]:
+            questions.append(
+                {
+                    "type": "vocabulary",
+                    "prompt": f'Which option best matches how "{word}" is used in the passage?',
+                    "options": [
+                        f"the intended meaning of {word} in context",
+                        f"an unrelated meaning of {word}",
+                        f"the opposite of {word}",
+                    ],
+                    "correct_option": f"the intended meaning of {word} in context",
+                    "explanation": (
+                        f'Re-read the sentence around "{word}" and match the meaning to context.'
+                    ),
+                    "source_word": word,
+                }
+            )
+        while len(questions) < count:
+            questions.append(
+                {
+                    "type": "comprehension",
+                    "prompt": "What is the main idea of the passage?",
+                    "options": [
+                        "It explains the topic and gives supporting detail",
+                        "It tells a personal story with no facts",
+                        "It lists unrelated opinions",
+                    ],
+                    "correct_option": "It explains the topic and gives supporting detail",
+                    "explanation": "The passage develops one topic with concrete supporting detail.",
+                    "source_word": "",
+                }
+            )
+        return normalize_reading_questions_payload(
+            {"questions": questions},
+            count=count,
+            fallback_questions=context.get("fallback_questions"),
+        )
+
+    async def generate_coaching_notes(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        level = str(context.get("level") or "B1")
+        looked_up = [str(w) for w in (context.get("looked_up_words") or [])][:8]
+        reading_correct = int(context.get("reading_correct") or 0)
+        reading_total = int(context.get("reading_total") or 0)
+        notes = [
+            f"Anchor level: {level}. Keep most new words near this band until recall is stable.",
+            (
+                f"Revisit looked-up words tomorrow: {', '.join(looked_up[:6])}."
+                if looked_up
+                else "No lookup-heavy word today; keep the normal daily mix."
+            ),
+            (
+                f"Reading: {reading_correct}/{reading_total} correct — "
+                + (
+                    "add easier context questions next time."
+                    if reading_total and reading_correct / max(1, reading_total) < 0.7
+                    else "ready for a slightly denser passage."
+                )
+            ),
+        ]
+        return normalize_coaching_notes_payload(
+            {
+                "headline": f"Day {context.get('day_number') or 1}: steady {level} progress",
+                "notes": notes,
+                "next_focus": "Blend recall of today's words with a denser reading passage.",
+                "recommended_words": looked_up,
+            },
+            context=context,
+        )
 
     async def generate_vocab_daily_mission(
         self,
@@ -498,9 +614,10 @@ class MockLLMProvider(LLMProvider):
     ) -> Dict[str, Any]:
         from .json_utils import normalize_vocab_quiz_ai_feedback
 
-        _ = (task_type, prompt, context, source_sentence, rubric, accepted_flexibility)
+        _ = (prompt, context, source_sentence, rubric, accepted_flexibility)
         s = learner_answer.strip()
         word = target_word.lower()
+        max_score = int((ai_scoring or {}).get("max_score") or 5)
         if not s:
             status = "fail"
             score = 0
@@ -515,10 +632,42 @@ class MockLLMProvider(LLMProvider):
             given_norm = s.lower()
             if model_norm and (model_norm == given_norm or model_norm in given_norm):
                 status = "ok"
-                score = 5
+                score = max_score
             else:
                 status = "ok"
-                score = 4
+                score = max(4, max_score - 1)
+
+        corrected = s
+        score_explanation = ""
+        score_breakdown: list[dict[str, Any]] = []
+        recommendation = ""
+        if score >= max_score:
+            recommendation = f"Good use of '{target_word}'."
+        elif score >= 4:
+            corrected = model_answer.strip() or s
+            score_explanation = (
+                f"You earned {score}/{max_score}: meaning is mostly right, "
+                f"but wording is not as natural as a strong answer."
+            )
+            recommendation = (
+                f"Your phrase «{s[:80]}» is understandable but awkward. "
+                f"Try «{corrected[:80]}» because it matches the prompt more naturally."
+            )
+            score_breakdown = [
+                {
+                    "criterion": "meaning",
+                    "points": max_score - 1,
+                    "note": "Core meaning is clear.",
+                },
+                {
+                    "criterion": "naturalness",
+                    "points": score,
+                    "note": "Word order or collocation could be smoother.",
+                },
+            ]
+        else:
+            recommendation = f"Rewrite using '{target_word}' naturally for this prompt."
+
         return normalize_vocab_quiz_ai_feedback(
             {
                 "status": status,
@@ -527,15 +676,14 @@ class MockLLMProvider(LLMProvider):
                 or score >= int((ai_scoring or {}).get("pass_score") or 4),
                 "uses_target_word": word in s.lower(),
                 "answers_task": len(s.split()) >= 3,
-                "corrected_sentence": s,
-                "recommendation": (
-                    f"Good use of '{target_word}'."
-                    if status == "ok"
-                    else f"Rewrite using '{target_word}' naturally for this prompt."
-                ),
+                "corrected_sentence": corrected,
+                "recommendation": recommendation,
+                "score_explanation": score_explanation,
+                "score_breakdown": score_breakdown,
             },
             learner_answer=learner_answer,
             model_answer=model_answer,
+            task_type=task_type,
             ai_scoring=ai_scoring,
         )
 

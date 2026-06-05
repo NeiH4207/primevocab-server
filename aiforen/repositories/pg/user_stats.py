@@ -153,6 +153,20 @@ class UserStatsRepo:
         await self._update(user_id, **updates)
         return await self.get_or_default(user_id)
 
+    async def clear_vocab_calibration(self, user_id: str) -> Dict[str, Any]:
+        """Reset the quick-check flag so the calibration screen reappears."""
+        existing = await self.get_or_default(user_id)
+        profile = dict(existing.get("vocab_profile") or {})
+        for key in (
+            "calibration_completed",
+            "calibration_completed_at",
+            "calibration_cefr_level",
+            "calibration_insight",
+        ):
+            profile.pop(key, None)
+        await self._update(user_id, vocab_profile=profile)
+        return await self.get_or_default(user_id)
+
     def _pack_mastery_map(self, stats: Dict[str, Any]) -> Dict[str, Any]:
         profile = stats.get("vocab_profile") or {}
         raw = profile.get("pack_mastery")

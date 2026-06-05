@@ -571,6 +571,7 @@ from aiforen.domain.vocab_mastery_score import (
     migrate_legacy_word_points,
     word_budget_pct,
 )
+from aiforen.domain.vocab_workout import canonical_skill, mastery_slot_credit_key
 from aiforen.integrations.llm.factory import get_llm_provider
 from aiforen.integrations.llm.json_utils import (
     normalize_vocab_calibration_payload,
@@ -843,6 +844,11 @@ class LearningService:
         ai_eval_meta: Optional[Dict[str, Any]] = None,
         weakness_tags: Optional[List[str]] = None,
         occurred_at: Optional[datetime] = None,
+        workout_id: Optional[str] = None,
+        workout_item_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        mastery_slot: Optional[int] = None,
+        interaction_kind: Optional[str] = None,
     ) -> None:
         try:
             await self.personalization.record_vocab_event(
@@ -859,6 +865,11 @@ class LearningService:
                 ai_eval_meta=ai_eval_meta or {},
                 weakness_tags=weakness_tags or [],
                 occurred_at=occurred_at,
+                workout_id=workout_id,
+                workout_item_id=workout_item_id,
+                skill_id=skill_id,
+                mastery_slot=mastery_slot,
+                interaction_kind=interaction_kind,
                 progress=progress,
                 word=word,
                 pack_mastery_pct=pack_mastery_pct,
@@ -1894,6 +1905,87 @@ class LearningService:
         )
         return await self._enrich_vocab_packs_batch(user_id=user_id, packs=packs)
 
+    async def _progress_by_word_id(
+        self,
+        *,
+        user_id: str,
+        pack_id: str,
+        word_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not word_ids:
+            return {}
+        progress_items = await self._pack_progress_items(
+            user_id=user_id, pack_id=pack_id, word_ids=word_ids
+        )
+        progress_by_id: Dict[str, Dict[str, Any]] = {}
+        alias_to_progress: Dict[str, Dict[str, Any]] = {}
+        progress_content_ids = [p["content_id"] for p in progress_items]
+        all_ids = list({*progress_content_ids, *word_ids})
+        id_map = (
+            await self.lexicon.resolve_word_ids(all_ids)
+            if self.lexicon is not None
+            else {}
+        )
+        for p in progress_items:
+            cid = p["content_id"]
+            alias_to_progress[cid] = p
+            lex_id = id_map.get(cid)
+            if lex_id:
+                alias_to_progress[str(lex_id)] = p
+        for wid in word_ids:
+            row = alias_to_progress.get(wid)
+            if row is None:
+                lex_id = id_map.get(wid)
+                if lex_id:
+                    row = alias_to_progress.get(str(lex_id))
+            if row is not None:
+                progress_by_id[wid] = row
+        return progress_by_id
+
+    def _word_mastered(self, progress: Optional[Dict[str, Any]]) -> bool:
+        return bool(
+            progress
+            and (
+                progress.get("marked_known")
+                or progress.get("mastery_level") == "mastered"
+            )
+        )
+
+    def _word_locked(self, progress: Optional[Dict[str, Any]], now: datetime) -> bool:
+        locked_until = _as_utc_aware((progress or {}).get("failed_locked_until"))
+        return bool(locked_until and locked_until > now)
+
+    async def _decorate_vocab_session_words(
+        self,
+        *,
+        pack_id: str,
+        pack_total: int,
+        selected_wids: List[str],
+        progress_by_id: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        mastery_steps = {
+            wid: self._mastery_step_for(progress_by_id.get(wid))
+            for wid in selected_wids
+        }
+        hydrated_map = await self._get_vocab_words_batch(
+            selected_wids,
+            pack_id=pack_id,
+            mastery_steps=mastery_steps,
+        )
+        decorated: List[Dict[str, Any]] = []
+        for wid in selected_wids:
+            hydrated = hydrated_map.get(wid)
+            if not hydrated:
+                continue
+            decorated.append(
+                self._decorate_vocab_word(
+                    hydrated,
+                    progress_by_id.get(wid),
+                    pack_total_words=pack_total,
+                )
+            )
+        return decorated
+
     async def get_vocab_session(
         self,
         *,
@@ -1901,6 +1993,7 @@ class LearningService:
         pack_id: str,
         limit: int = 5,
         word_ids: Optional[List[str]] = None,
+        random_any: bool = False,
     ) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         pack = await self._get_vocab_pack(pack_id)
@@ -1969,83 +2062,69 @@ class LearningService:
                 )
             return {"pack": pack, "words": decorated, "count": len(decorated)}
 
-        words = await self._list_vocab_words(pack_id=pack_id, limit=500)
-        word_ids = [w["word_id"] for w in words]
-        progress_items = await self._pack_progress_items(
-            user_id=user_id, pack_id=pack_id, word_ids=word_ids
+        pack_total = (await self._count_words_by_packs([pack_id])).get(pack_id, 0)
+        scan_limit = max(1, min(limit, 500))
+        all_word_ids = await self.lexicon.list_word_ids_for_pack(
+            pack_id, limit=scan_limit
         )
-        progress_by_id: Dict[str, Dict[str, Any]] = {}
-        alias_to_progress: Dict[str, Dict[str, Any]] = {}
-        progress_content_ids = [p["content_id"] for p in progress_items]
-        all_ids = list({*progress_content_ids, *word_ids})
-        id_map = (
-            await self.lexicon.resolve_word_ids(all_ids)
-            if self.lexicon is not None
-            else {}
-        )
-        for p in progress_items:
-            cid = p["content_id"]
-            alias_to_progress[cid] = p
-            lex_id = id_map.get(cid)
-            if lex_id:
-                alias_to_progress[str(lex_id)] = p
-        for wid in word_ids:
-            row = alias_to_progress.get(wid)
-            if row is None:
-                lex_id = id_map.get(wid)
-                if lex_id:
-                    row = alias_to_progress.get(str(lex_id))
-            if row is not None:
-                progress_by_id[wid] = row
+        if not all_word_ids:
+            return {"pack": pack, "words": [], "count": 0}
+        if not pack_total:
+            pack_total = len(all_word_ids)
 
-        due: List[Dict[str, Any]] = []
-        new: List[Dict[str, Any]] = []
-        for word in words:
-            progress = progress_by_id.get(word["word_id"])
-            if progress and (
-                progress.get("marked_known")
-                or progress.get("mastery_level") == "mastered"
-            ):
+        progress_by_id = await self._progress_by_word_id(
+            user_id=user_id, pack_id=pack_id, word_ids=all_word_ids
+        )
+
+        if random_any:
+            eligible: List[str] = []
+            for wid in all_word_ids:
+                progress = progress_by_id.get(wid)
+                if self._word_mastered(progress):
+                    continue
+                if self._word_locked(progress, now):
+                    continue
+                eligible.append(wid)
+            random.shuffle(eligible)
+            selected_wids = eligible[:scan_limit]
+            decorated = await self._decorate_vocab_session_words(
+                pack_id=pack_id,
+                pack_total=pack_total,
+                selected_wids=selected_wids,
+                progress_by_id=progress_by_id,
+            )
+            return {"pack": pack, "words": decorated, "count": len(decorated)}
+
+        due_ids: List[str] = []
+        new_ids: List[str] = []
+        for wid in all_word_ids:
+            progress = progress_by_id.get(wid)
+            if self._word_mastered(progress):
                 continue
             if progress and self._is_seen_today(
                 progress.get("last_seen_date"), progress.get("last_studied")
             ):
                 continue
-            locked_until = progress.get("failed_locked_until") if progress else None
-            if locked_until and locked_until > now:
+            if self._word_locked(progress, now):
                 continue
             next_review = _as_utc_aware(
                 ((progress or {}).get("spaced_repetition") or {}).get("next_review")
             )
             if progress and next_review and next_review <= now:
-                due.append(word)
+                due_ids.append(wid)
             elif not progress:
-                new.append(word)
+                new_ids.append(wid)
 
-        random.shuffle(due)
-        random.shuffle(new)
-        selected = (due + new)[: max(1, min(limit, 20))]
+        random.shuffle(due_ids)
+        random.shuffle(new_ids)
+        selected_wids = (due_ids + new_ids)[:cap]
 
-        pack_total = len(word_ids)
-        mastery_steps = {
-            word["word_id"]: self._mastery_step_for(progress_by_id.get(word["word_id"]))
-            for word in selected
-        }
-        hydrated_map = await self._get_vocab_words_batch(
-            [word["word_id"] for word in selected],
+        decorated = await self._decorate_vocab_session_words(
             pack_id=pack_id,
-            mastery_steps=mastery_steps,
+            pack_total=pack_total,
+            selected_wids=selected_wids,
+            progress_by_id=progress_by_id,
         )
-        decorated = []
-        for word in selected:
-            wid = word["word_id"]
-            progress = progress_by_id.get(wid)
-            hydrated = hydrated_map.get(wid) or word
-            decorated.append(
-                self._decorate_vocab_word(
-                    hydrated, progress, pack_total_words=pack_total
-                )
-            )
 
         # NOTE: we deliberately do NOT mark `last_seen_date` here so that
         # reloading the page returns the same queue.  The date is set when
@@ -2707,6 +2786,11 @@ class LearningService:
         reorder_order: Optional[List[int]] = None,
         pack_id: Optional[str] = None,
         time_taken: int = 0,
+        workout_id: Optional[str] = None,
+        workout_item_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        mastery_slot: Optional[int] = None,
+        interaction_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         now = datetime.utcnow()
         word = await self._get_vocab_word(word_id, pack_id=pack_id)
@@ -2807,7 +2891,12 @@ class LearningService:
             state["best_streak"] = max(
                 int(state.get("best_streak", 0)), int(state["current_streak"])
             )
-            slot_key = resolved_qid or f"{q_type}:{answer_meta.get('mastery_slot', 0)}"
+            slot_key = mastery_slot_credit_key(
+                track_id=getattr(question_row, "track_id", None),
+                mastery_slot=getattr(question_row, "mastery_slot", None),
+                fallback_question_id=resolved_qid,
+                task_type=q_type,
+            )
             credited_slots = {str(x) for x in (state.get("quiz_slots_credited") or [])}
             if slot_key not in credited_slots:
                 credited_slots.add(slot_key)
@@ -2826,15 +2915,14 @@ class LearningService:
                     len(credited_slots) + (1 if state.get("learn_credited") else 0),
                 )
         else:
-            state["mastery_step"] = 0
-            state["mastery_level"] = "new"
+            # Keep previously credited matrix slots. A wrong answer creates a
+            # targeted repair issue; it must not erase evidence already earned.
+            credited_slots = {str(x) for x in (state.get("quiz_slots_credited") or [])}
+            state["mastery_step"] = min(
+                QUIZ_MATRIX_SLOTS,
+                len(credited_slots) + (1 if state.get("learn_credited") else 0),
+            )
             state["current_streak"] = 0
-            if pack_id:
-                await self._withdraw_word_cycle_points(
-                    user_id=user_id, pack_id=pack_id, state=state
-                )
-            self._clear_vocab_cycle_flags(state)
-            state["quiz_slots_credited"] = []
             state["failed_locked_until"] = self._tomorrow_start()
             state["spaced_repetition"] = {
                 "ease_factor": 2.5,
@@ -2903,8 +2991,13 @@ class LearningService:
                 if ai_feedback
                 else None
             ),
-            weakness_tags=[] if is_correct else [f"{q_type or 'quiz'}_wrong"],
+            weakness_tags=[] if is_correct else [canonical_skill(q_type or "meaning")],
             occurred_at=now,
+            workout_id=workout_id,
+            workout_item_id=workout_item_id,
+            skill_id=skill_id,
+            mastery_slot=mastery_slot,
+            interaction_kind=interaction_kind,
         )
         return {
             "word_id": word_id,

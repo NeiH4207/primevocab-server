@@ -17,12 +17,17 @@ from aiforen.core.deps import (
     get_redis,
 )
 from aiforen.services.learning_service import LearningService
+from aiforen.services.vocab_workout_service import VocabWorkoutService
 
 router = APIRouter()
 
 
 def _learning_svc(pg: AsyncSession) -> LearningService:
     return LearningService(pg)
+
+
+def _workout_svc(pg: AsyncSession) -> VocabWorkoutService:
+    return VocabWorkoutService(pg)
 
 
 # ---------- dictionary proxy (Cambridge-style entry) ----------
@@ -299,6 +304,104 @@ async def vocab_coach_insight(
     )
 
 
+class VocabWorkoutAnswerIn(BaseModel):
+    attempt_id: str = Field(..., min_length=8, max_length=128)
+    selected_option_id: Optional[str] = None
+    free_text_answer: Optional[str] = None
+    reorder_order: Optional[List[int]] = None
+    time_taken: int = Field(default=0, ge=0)
+
+
+@router.get("/vocab/today-workout")
+async def vocab_today_workout(
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    return _wrap(
+        await _workout_svc(pg).today(user_id=user.id, plan_code=user.plan_code)
+    )
+
+
+@router.get("/vocab/workouts/{workout_id}")
+async def vocab_workout(
+    workout_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _wrap(await _workout_svc(pg).get(user_id=user.id, workout_id=workout_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/vocab/workouts/{workout_id}/start")
+async def start_vocab_workout(
+    workout_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _wrap(
+            await _workout_svc(pg).start(user_id=user.id, workout_id=workout_id)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/vocab/workouts/{workout_id}/items/{item_id}/answer")
+async def answer_vocab_workout_item(
+    workout_id: str,
+    item_id: str,
+    payload: VocabWorkoutAnswerIn,
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _wrap(
+            await _workout_svc(pg).answer(
+                user_id=user.id,
+                plan_code=user.plan_code,
+                workout_id=workout_id,
+                item_id=item_id,
+                attempt_id=payload.attempt_id,
+                selected_option_id=payload.selected_option_id,
+                free_text_answer=payload.free_text_answer,
+                reorder_order=payload.reorder_order,
+                time_taken=payload.time_taken,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/vocab/workouts/{workout_id}/skip")
+async def skip_vocab_workout(
+    workout_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _wrap(
+            await _workout_svc(pg).skip(user_id=user.id, workout_id=workout_id)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/vocab/workouts/{workout_id}/bonus")
+async def start_vocab_workout_bonus(
+    workout_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _wrap(
+            await _workout_svc(pg).bonus(user_id=user.id, workout_id=workout_id)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/vocab/calibration-words")
 async def vocab_calibration_words(
     limit: Optional[int] = Query(
@@ -345,6 +448,7 @@ async def vocab_session(
     pack_id: str = Query(...),
     limit: int = 5,
     word_ids: list[str] | None = Query(None),
+    random_any: bool = Query(False),
     user: CurrentUser = Depends(get_current_user),
     pg: AsyncSession = Depends(get_pg),
 ):
@@ -355,6 +459,7 @@ async def vocab_session(
             pack_id=pack_id,
             limit=limit,
             word_ids=word_ids,
+            random_any=random_any,
         )
     )
 

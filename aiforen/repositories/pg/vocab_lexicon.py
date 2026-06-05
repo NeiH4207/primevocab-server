@@ -245,12 +245,30 @@ class VocabLexiconRepo:
         items = (await self.s.execute(stmt)).scalars().all()
         out: List[Dict[str, Any]] = []
         for item in items:
+            if item.lexeme is None:
+                continue
             dto = self.lexeme_to_word_dto(
                 item.lexeme, pack_id=pack_id, sense_id=item.sense_id
             )
             if dto:
                 out.append(dto)
         return out
+
+    async def list_word_ids_for_pack(
+        self,
+        pack_id: str,
+        *,
+        limit: int = 5000,
+    ) -> List[str]:
+        """Lightweight pack listing (ids only) for session queue building."""
+        stmt = (
+            select(VocabPackItem.lexeme_id)
+            .where(VocabPackItem.pack_id == pack_id)
+            .order_by(VocabPackItem.order_index)
+            .limit(max(1, limit))
+        )
+        rows = (await self.s.execute(stmt)).scalars().all()
+        return [str(lex_id) for lex_id in rows if lex_id is not None]
 
     async def get_word_dto(
         self,
@@ -467,7 +485,15 @@ class VocabLexiconRepo:
     def _question_to_quiz_step(self, question: VocabQuestion) -> Dict[str, Any]:
         payload = question.payload if isinstance(question.payload, dict) else {}
         interaction = (question.interaction_kind or "mcq").strip().lower()
-        slot = int(question.mastery_slot or question.difficulty or 1)
+        raw_slot = (
+            question.mastery_slot
+            if question.mastery_slot is not None
+            else question.difficulty
+        )
+        try:
+            slot = int(raw_slot) if raw_slot is not None else 1
+        except (TypeError, ValueError):
+            slot = 1
         step: Dict[str, Any] = {
             "question_id": str(question.id),
             "mastery_slot": max(1, min(5, slot)),
@@ -560,6 +586,14 @@ class VocabLexiconRepo:
         track_questions = self._questions_for_track(
             lexeme, track, sense_id=sense.id if sense else None
         )
+        if not track_questions:
+            track_questions = self._active_questions(lexeme)
+            if sense is not None:
+                track_questions = [
+                    q
+                    for q in track_questions
+                    if q.sense_id is None or q.sense_id == sense.id
+                ]
         quiz_steps = [self._question_to_quiz_step(q) for q in track_questions]
         question = self._pick_question(
             lexeme, mastery_step=mastery_step, sense_id=sense_id

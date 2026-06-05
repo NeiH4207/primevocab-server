@@ -127,16 +127,31 @@ def import_lexemes(conn, rows: List[Dict[str, Any]]) -> None:
 
 def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
     cur = conn.cursor()
+    order_by_lexeme: Dict[uuid.UUID, int] = {}
     updated = 0
     for i in range(0, len(rows), BATCH):
         chunk = rows[i : i + BATCH]
-        params = []
-        sense_ins = []
+        params: List[Tuple[Any, ...]] = []
+        sense_ins: List[Tuple[str, str, int, str, Any]] = []
         for row in chunk:
             lid = _lid(row)
             tips = row.get("tips") if isinstance(row.get("tips"), list) else []
             syns = row.get("synonyms") if isinstance(row.get("synonyms"), list) else []
             def_en = (row.get("definition_en") or row.get("lemma") or "")[:8000]
+            raw_sid = (row.get("sense_id") or "").strip()
+            try:
+                sense_id = str(uuid.UUID(raw_sid)) if raw_sid else str(uuid.uuid4())
+            except ValueError:
+                sense_id = str(uuid.uuid4())
+            raw_order = row.get("sense_order")
+            if raw_order is not None:
+                sense_order = max(1, int(raw_order))
+            else:
+                order_by_lexeme[lid] = order_by_lexeme.get(lid, 0) + 1
+                sense_order = order_by_lexeme[lid]
+            sense_ins.append(
+                (sense_id, str(lid), sense_order, def_en, row.get("vi_gloss"))
+            )
             params.append(
                 (
                     def_en,
@@ -149,18 +164,22 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
                     [row.get("pack_id") or "general"],
                     json.dumps(tips),
                     json.dumps(syns),
-                    str(lid),
+                    sense_id,
                 )
             )
-            sense_ins.append((str(uuid.uuid4()), str(lid), def_en, row.get("vi_gloss")))
         psycopg2.extras.execute_batch(
             cur,
             """
             INSERT INTO vocab_senses (
               id, lexeme_id, sense_order, definition_en, vi_gloss,
               created_at, updated_at
-            ) VALUES (%s::uuid, %s::uuid, 1, %s, %s, NOW(), NOW())
-            ON CONFLICT ON CONSTRAINT uq_vocab_sense_order DO NOTHING
+            ) VALUES (%s::uuid, %s::uuid, %s, %s, %s, NOW(), NOW())
+            ON CONFLICT (id) DO UPDATE SET
+              lexeme_id = EXCLUDED.lexeme_id,
+              sense_order = EXCLUDED.sense_order,
+              definition_en = EXCLUDED.definition_en,
+              vi_gloss = COALESCE(EXCLUDED.vi_gloss, vocab_senses.vi_gloss),
+              updated_at = NOW()
             """,
             sense_ins,
         )
@@ -179,7 +198,7 @@ def import_senses(conn, rows: List[Dict[str, Any]]) -> None:
               tips = %s::jsonb,
               synonyms = %s::jsonb,
               updated_at = NOW()
-            WHERE lexeme_id = %s::uuid AND sense_order = 1
+            WHERE id = %s::uuid
             """,
             params,
         )
@@ -281,20 +300,10 @@ def import_packs(conn, rows: List[Dict[str, Any]]) -> None:
     cur.close()
 
 
-def import_questions(conn, storage: Path) -> None:
+def import_questions(
+    conn, storage: Path, *, level_codes: List[str] | None = None
+) -> None:
     cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM vocab_questions WHERE generator_meta->>'source' = 'vocab_storage'"
-    )
-    deleted = cur.rowcount
-    conn.commit()
-    logger.info("Removed {} prior vocab_storage questions", deleted)
-
-    cur.execute(
-        "SELECT lexeme_id::text, id::text FROM vocab_senses WHERE sense_order = 1"
-    )
-    sense_by_lexeme: Dict[str, str] = dict(cur.fetchall())
-
     quiz_paths = sorted(storage.glob("quiz_*_vocab.json"))
     order = {"A1": 0, "A2": 1, "B1": 2, "B2": 3, "C1": 4, "C2": 5, "IELTS": 6, "GRE": 7}
 
@@ -303,6 +312,47 @@ def import_questions(conn, storage: Path) -> None:
         return (order.get(str(level).upper(), 99), p.name)
 
     quiz_paths = sorted(quiz_paths, key=sort_key)
+
+    if level_codes:
+        want = {str(code).strip().upper() for code in level_codes if str(code).strip()}
+        quiz_paths = [
+            path
+            for path in quiz_paths
+            if str(json.loads(path.read_text(encoding="utf-8")).get("level_code") or "")
+            .strip()
+            .upper()
+            in want
+        ]
+        if not quiz_paths:
+            raise SystemExit(f"No quiz files for level(s): {sorted(want)}")
+        storage_files = [path.name for path in quiz_paths]
+        cur.execute(
+            """
+            DELETE FROM vocab_questions
+            WHERE generator_meta->>'source' = 'vocab_storage'
+              AND generator_meta->>'storage_file' = ANY(%s)
+            """,
+            (storage_files,),
+        )
+        logger.info(
+            "Removed {} prior vocab_storage questions for {}",
+            cur.rowcount,
+            ", ".join(sorted(want)),
+        )
+    else:
+        cur.execute(
+            "DELETE FROM vocab_questions WHERE generator_meta->>'source' = 'vocab_storage'"
+        )
+        logger.info("Removed {} prior vocab_storage questions", cur.rowcount)
+    conn.commit()
+
+    cur.execute(
+        "SELECT lexeme_id::text, id::text FROM vocab_senses WHERE sense_order = 1"
+    )
+    sense_by_lexeme: Dict[str, str] = dict(cur.fetchall())
+    cur.execute("SELECT id::text FROM vocab_senses")
+    valid_sense_ids = {row[0] for row in cur.fetchall()}
+
     # One row per (sense|lexeme, track, task_type, mastery_slot); later quiz files win.
     pending: Dict[Tuple[str, str, str, int], Tuple[Any, ...]] = {}
     skipped = 0
@@ -317,7 +367,10 @@ def import_questions(conn, storage: Path) -> None:
             if not lemma:
                 continue
             lid = lexeme_id_for(lemma, _normalize_pos(ref.get("pos") or "noun"))
-            sense_id = ref.get("sense_id") or sense_by_lexeme.get(str(lid))
+            raw_sid = (ref.get("sense_id") or "").strip()
+            sense_id = sense_by_lexeme.get(str(lid))
+            if raw_sid and raw_sid in valid_sense_ids:
+                sense_id = raw_sid
             for q in item.get("questions") or []:
                 row = question_row_from_quiz(
                     q,
@@ -424,6 +477,12 @@ def main() -> None:
         metavar="LEMMA",
         help="Only process row(s) with this lemma (repeatable, e.g. --lemma aids)",
     )
+    parser.add_argument(
+        "--quiz-levels",
+        metavar="LEVEL",
+        help="Comma-separated quiz level codes to import (e.g. A1,A2,GRE). "
+        "With --questions-only, replaces only those quiz files.",
+    )
     args = parser.parse_args()
     if args.packs_only:
         args.skip_lexemes = True
@@ -447,6 +506,14 @@ def main() -> None:
             raise SystemExit(f"No vocab rows for lemma(s): {sorted(want)}")
     logger.info("Loaded {} vocab rows to process", len(rows))
 
+    quiz_levels: List[str] | None = None
+    if args.quiz_levels:
+        quiz_levels = [
+            part.strip().upper() for part in args.quiz_levels.split(",") if part.strip()
+        ]
+        if not quiz_levels:
+            raise SystemExit("--quiz-levels must list at least one level code")
+
     conn = _connect_pg()
     conn.autocommit = False
     try:
@@ -464,7 +531,7 @@ def main() -> None:
                 logger.info("Updating senses…")
                 import_senses(conn, rows)
         if not args.skip_questions:
-            import_questions(conn, storage)
+            import_questions(conn, storage, level_codes=quiz_levels)
     finally:
         conn.close()
     logger.info("Bulk import complete")

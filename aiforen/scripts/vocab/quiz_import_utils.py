@@ -12,7 +12,93 @@ QUIZ_TASK_ALIASES: Dict[str, str] = {
     "gre_sentence_completion": "gre_completion",
 }
 
+# Must stay in sync with production ck_vocab_question_task_type (see sync_quiz_task_type_constraint.py).
+QUIZ_ALLOWED_TASK_TYPES = frozenset(
+    {
+        "academic_collocation",
+        "advanced_paraphrase",
+        "cloze",
+        "collocation",
+        "collocation_mcq",
+        "context_meaning",
+        "error_correction",
+        "error_diagnosis",
+        "gre_completion",
+        "gre_logic_contrast",
+        "gre_nuance_rationale_challenge",
+        "gre_precision_definition",
+        "gre_sentence_equivalence",
+        "gre_text_completion",
+        "guided_rewrite",
+        "ielts_collocation_cloze",
+        "ielts_micro_response_challenge",
+        "ielts_paraphrase_recognition",
+        "ielts_sentence_upgrade",
+        "ielts_topic_meaning_mcq",
+        "meaning_in_context",
+        "meaning_in_micro_context",
+        "meaning_mcq",
+        "nuance_in_context",
+        "nuance_rationale_challenge",
+        "nuance_register",
+        "paraphrase",
+        "pattern_cloze",
+        "precision_cloze",
+        "precision_in_context",
+        "precision_nuance_challenge",
+        "register_choice",
+        "register_tone_judgment",
+        "rewrite_target",
+        "rewrite_with_target",
+        "sentence_reorder",
+        "simple_cloze",
+        "simple_usage_recognition",
+        "targeted_rewrite_challenge",
+        "translate_with_hints",
+        "usage_fix",
+        "vn_meaning_mcq",
+    }
+)
+
 ACTIVE_STATUSES = frozenset({"validated", "approved", "generated"})
+
+# Must match production ck_vocab_question_skill (Postgres CHECK).
+ALLOWED_SKILLS = frozenset(
+    {
+        "meaning",
+        "context",
+        "sense",
+        "collocation",
+        "pattern",
+        "grammar_pattern",
+        "usage",
+        "register",
+        "nuance",
+        "paraphrase",
+        "gre",
+        "syntax",
+        "production",
+        "error_correction",
+        "error_diagnosis",
+        "precise_meaning",
+        "semantic_logic",
+        "text_completion",
+        "sentence_equivalence",
+        "verbal_reasoning",
+        "topic_meaning",
+        "academic_collocation",
+        "academic_production",
+        "argument_production",
+        "precision",
+    }
+)
+
+SKILL_ALIASES: Dict[str, str] = {
+    "register_precision": "precision",
+    "precision_cloze": "precision",
+    "controlled_production": "production",
+    "nuance_production": "nuance",
+}
 
 
 def canonical_task_type(raw: str) -> str:
@@ -32,12 +118,12 @@ def track_id_from_level(level_code: str) -> str:
 
 
 def skill_for_task(task_type: str, raw_skill: Optional[str] = None) -> str:
-    if raw_skill and str(raw_skill).strip():
-        return str(raw_skill).strip()
-    return {
+    from_task = {
         "vn_meaning_mcq": "meaning",
         "meaning_mcq": "meaning",
         "meaning_in_context": "meaning",
+        "meaning_in_micro_context": "meaning",
+        "simple_usage_recognition": "usage",
         "simple_cloze": "context",
         "pattern_cloze": "pattern",
         "cloze": "pattern",
@@ -64,6 +150,11 @@ def skill_for_task(task_type: str, raw_skill: Optional[str] = None) -> str:
         "gre_completion": "text_completion",
         "paraphrase": "paraphrase",
     }.get(task_type, "meaning")
+    if raw_skill and str(raw_skill).strip():
+        normalized = SKILL_ALIASES.get(str(raw_skill).strip(), str(raw_skill).strip())
+        if normalized in ALLOWED_SKILLS:
+            return normalized
+    return from_task
 
 
 def map_question_status(raw: Optional[str]) -> str:
@@ -91,11 +182,12 @@ def wire_options(options: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], s
 
 
 def question_prompt(q: Dict[str, Any]) -> str:
+    """Question text only; context is stored separately in payload for the UI."""
     prompt = (q.get("prompt") or "").strip()
+    if prompt:
+        return prompt
     context = (q.get("context") or "").strip()
-    if context and context not in prompt:
-        return f"{prompt}\n\n{context}" if prompt else context
-    return prompt or "Choose the best answer."
+    return context or "Choose the best answer."
 
 
 def question_row_from_quiz(

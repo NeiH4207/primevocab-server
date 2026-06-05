@@ -669,6 +669,15 @@ class VocabQuestion(Base):
         String(16), nullable=False, server_default="generated"
     )
     generator_meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, server_default="{}")
+    quality_score: Mapped[Optional[int]] = mapped_column(Integer)
+    quality_tier: Mapped[Optional[str]] = mapped_column(String(16))
+    quality_issues: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    content_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    sense_content_hash: Mapped[Optional[str]] = mapped_column(String(64))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -770,6 +779,11 @@ class LearningEvent(Base):
     weakness_tags: Mapped[List[str]] = mapped_column(
         JSONB, nullable=False, server_default="[]"
     )
+    workout_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    workout_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    skill_id: Mapped[Optional[str]] = mapped_column(String(32))
+    mastery_slot: Mapped[Optional[int]] = mapped_column(Integer)
+    interaction_kind: Mapped[Optional[str]] = mapped_column(String(16))
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -956,6 +970,9 @@ class UserLearningWeakness(Base):
     evidence: Mapped[Dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
+    success_streak: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -1009,6 +1026,307 @@ class VocabDailyMission(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+
+class VocabCoachingWorkout(Base):
+    __tablename__ = "vocab_coaching_workouts"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "workout_date", "track_id", name="uq_vocab_coaching_workout_day"
+        ),
+        Index("ix_vocab_coaching_workout_user_date", "user_id", "workout_date"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    workout_date: Mapped[date] = mapped_column(Date, nullable=False)
+    track_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="cefr:B1"
+    )
+    cefr_level: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default="B1"
+    )
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default="ready"
+    )
+    focus_skill: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="meaning"
+    )
+    intensity: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="standard"
+    )
+    estimated_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="10"
+    )
+    coach_copy: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    progress: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    summary: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class VocabCoachingWorkoutItem(Base):
+    __tablename__ = "vocab_coaching_workout_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "workout_id", "order_index", name="uq_vocab_coaching_workout_item_order"
+        ),
+        Index("ix_vocab_coaching_item_workout_order", "workout_id", "order_index"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vocab_coaching_workouts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    phase: Mapped[str] = mapped_column(String(16), nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    word_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vocab_questions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    mastery_slot: Mapped[int] = mapped_column(Integer, nullable=False)
+    skill_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    interaction_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default="pending"
+    )
+    attempt_id: Mapped[Optional[str]] = mapped_column(String(128))
+    result: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    repair_parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vocab_coaching_workout_items.id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class VocabUserSkillState(Base):
+    __tablename__ = "vocab_user_skill_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "track_id", "skill_id", name="uq_vocab_user_skill_state"
+        ),
+        Index("ix_vocab_user_skill_state_user_due", "user_id", "due_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    track_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    skill_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    score: Mapped[float] = mapped_column(
+        Numeric(6, 3), nullable=False, server_default="0"
+    )
+    evidence_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    correct_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    incorrect_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    success_streak: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Vocab Coaching (31-day adaptive plan: quick-check-once → daily sessions)
+# ---------------------------------------------------------------------------
+
+
+class VocabCoachingPlan(Base):
+    __tablename__ = "vocab_coaching_plans"
+    __table_args__ = (
+        Index(
+            "uq_vocab_coaching_plan_active",
+            "user_id",
+            unique=True,
+            postgresql_where=(Column("status") == "active"),
+        ),
+        Index("ix_vocab_coaching_plan_user", "user_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="active"
+    )
+    cefr_level: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default="B1"
+    )
+    estimated_band: Mapped[Optional[float]] = mapped_column(Numeric(3, 1))
+    confidence: Mapped[Optional[float]] = mapped_column(Numeric(5, 2))
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="api"
+    )
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    current_day: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    total_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="31"
+    )
+    meta: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class VocabCoachingDay(Base):
+    __tablename__ = "vocab_coaching_days"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "day_number", name="uq_vocab_coaching_day_number"),
+        Index("ix_vocab_coaching_day_plan", "plan_id", "day_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vocab_coaching_plans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    day_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="locked"
+    )
+    date_key: Mapped[Optional[date]] = mapped_column(Date)
+    title: Mapped[Optional[str]] = mapped_column(Text)
+    focus_skill: Mapped[Optional[str]] = mapped_column(String(32))
+    words: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    reading: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    sessions: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    analysis: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    notes: Mapped[List[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class VocabCoachingEvent(Base):
+    __tablename__ = "vocab_coaching_events"
+    __table_args__ = (
+        Index(
+            "ix_vocab_coaching_event_day",
+            "plan_id",
+            "day_number",
+            "event_type",
+        ),
+        Index("ix_vocab_coaching_event_user", "user_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vocab_coaching_plans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    day_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vocab_coaching_days.id", ondelete="CASCADE"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    day_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    word: Mapped[Optional[str]] = mapped_column(String(128))
+    phrase: Mapped[Optional[str]] = mapped_column(Text)
+    sentence: Mapped[Optional[str]] = mapped_column(Text)
+    is_correct: Mapped[Optional[bool]] = mapped_column(Boolean)
+    payload: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 

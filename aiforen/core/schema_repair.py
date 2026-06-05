@@ -318,3 +318,114 @@ async def _repair_postgres_content_and_progress(conn) -> None:
             )
         )
         logger.info("schema_repair: created vocab_attempts")
+
+    await _repair_vocab_coaching(conn)
+
+
+async def _repair_vocab_coaching(conn) -> None:
+    """Create 31-day vocab coaching tables if a running API is ahead of migrations."""
+    if not await _table_exists(conn, "vocab_coaching_plans"):
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE vocab_coaching_plans (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  status VARCHAR(16) NOT NULL DEFAULT 'active',
+                  cefr_level VARCHAR(8) NOT NULL DEFAULT 'B1',
+                  estimated_band NUMERIC(3,1),
+                  confidence NUMERIC(5,2),
+                  source VARCHAR(16) NOT NULL DEFAULT 'api',
+                  start_date DATE NOT NULL,
+                  current_day INTEGER NOT NULL DEFAULT 1,
+                  total_days INTEGER NOT NULL DEFAULT 31,
+                  meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_vocab_coaching_plan_active "
+                "ON vocab_coaching_plans (user_id) WHERE status = 'active'"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX ix_vocab_coaching_plan_user "
+                "ON vocab_coaching_plans (user_id, status)"
+            )
+        )
+        logger.info("schema_repair: created vocab_coaching_plans")
+
+    if not await _table_exists(conn, "vocab_coaching_days"):
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE vocab_coaching_days (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  plan_id UUID NOT NULL REFERENCES vocab_coaching_plans(id) ON DELETE CASCADE,
+                  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  day_number INTEGER NOT NULL,
+                  status VARCHAR(16) NOT NULL DEFAULT 'locked',
+                  date_key DATE,
+                  title TEXT,
+                  focus_skill VARCHAR(32),
+                  words JSONB NOT NULL DEFAULT '[]'::jsonb,
+                  reading JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  sessions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  analysis JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  notes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                  started_at TIMESTAMPTZ,
+                  completed_at TIMESTAMPTZ,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                  UNIQUE (plan_id, day_number)
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX ix_vocab_coaching_day_plan "
+                "ON vocab_coaching_days (plan_id, day_number)"
+            )
+        )
+        logger.info("schema_repair: created vocab_coaching_days")
+
+    if not await _table_exists(conn, "vocab_coaching_events"):
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE vocab_coaching_events (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  plan_id UUID NOT NULL REFERENCES vocab_coaching_plans(id) ON DELETE CASCADE,
+                  day_id UUID REFERENCES vocab_coaching_days(id) ON DELETE CASCADE,
+                  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  day_number INTEGER NOT NULL,
+                  event_type VARCHAR(32) NOT NULL,
+                  word VARCHAR(128),
+                  phrase TEXT,
+                  sentence TEXT,
+                  is_correct BOOLEAN,
+                  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX ix_vocab_coaching_event_day "
+                "ON vocab_coaching_events (plan_id, day_number, event_type)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX ix_vocab_coaching_event_user "
+                "ON vocab_coaching_events (user_id, created_at)"
+            )
+        )
+        logger.info("schema_repair: created vocab_coaching_events")

@@ -14,11 +14,17 @@ from aiforen.core.config import get_settings
 
 from .base import EvaluationStreamEvent, LLMProvider
 from .json_utils import (
+    build_coaching_notes_prompt,
+    build_reading_explain_prompt,
+    build_reading_questions_prompt,
     build_vocab_calibration_prompt,
     build_vocab_daily_mission_prompt,
     build_vocab_eval_prompt,
     build_vocab_quiz_eval_prompt,
     extract_json,
+    normalize_coaching_notes_payload,
+    normalize_reading_explain_payload,
+    normalize_reading_questions_payload,
     normalize_vocab_calibration_payload,
     normalize_vocab_daily_mission_payload,
     normalize_vocab_eval_payload,
@@ -85,6 +91,90 @@ class AnthropicLLMProvider(LLMProvider):
             extract_json(text),
             context=context,
         )
+
+    async def explain_reading_phrase(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        settings = get_settings()
+        if not settings.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is missing")
+
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        prompt = build_reading_explain_prompt(context=context)
+        primary = settings.anthropic_vocab_eval_model or settings.anthropic_model
+        models = vocab_eval_model_chain(primary)
+        resp, _used_model = await anthropic_messages_with_model_fallback(
+            client,
+            models=models,
+            max_tokens=500,
+            temperature=0.2,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "\n".join(
+            block.text for block in resp.content if getattr(block, "type", "") == "text"
+        ).strip()
+        return normalize_reading_explain_payload(
+            extract_json(text),
+            phrase=str(context.get("phrase") or ""),
+            sentence=str(context.get("sentence") or ""),
+            level=str(context.get("level") or "B1"),
+        )
+
+    async def generate_reading_questions(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        settings = get_settings()
+        if not settings.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is missing")
+
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        prompt = build_reading_questions_prompt(context=context)
+        primary = settings.anthropic_vocab_eval_model or settings.anthropic_model
+        models = vocab_eval_model_chain(primary)
+        resp, _used_model = await anthropic_messages_with_model_fallback(
+            client,
+            models=models,
+            max_tokens=1300,
+            temperature=0.3,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "\n".join(
+            block.text for block in resp.content if getattr(block, "type", "") == "text"
+        ).strip()
+        return normalize_reading_questions_payload(
+            extract_json(text),
+            count=int(context.get("count") or 4),
+            fallback_questions=context.get("fallback_questions"),
+        )
+
+    async def generate_coaching_notes(
+        self,
+        *,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        settings = get_settings()
+        if not settings.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is missing")
+
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        prompt = build_coaching_notes_prompt(context=context)
+        primary = settings.anthropic_vocab_eval_model or settings.anthropic_model
+        models = vocab_eval_model_chain(primary)
+        resp, _used_model = await anthropic_messages_with_model_fallback(
+            client,
+            models=models,
+            max_tokens=700,
+            temperature=0.3,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "\n".join(
+            block.text for block in resp.content if getattr(block, "type", "") == "text"
+        ).strip()
+        return normalize_coaching_notes_payload(extract_json(text), context=context)
 
     async def evaluate_vocab_sentence(
         self,
@@ -180,6 +270,7 @@ class AnthropicLLMProvider(LLMProvider):
             payload,
             learner_answer=learner_answer,
             model_answer=model_answer,
+            task_type=task_type,
             ai_scoring=ai_scoring,
         )
 

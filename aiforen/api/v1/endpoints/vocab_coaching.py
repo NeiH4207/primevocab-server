@@ -91,7 +91,7 @@ class CoachingTranslateIn(BaseModel):
     target_language: str = Field(default="vi", min_length=2, max_length=8)
 
 
-class CoachingHelperActionIn(BaseModel):
+class ReadingCoachActionIn(BaseModel):
     event_type: str = Field(..., max_length=32)
     event_id: Optional[str] = Field(default=None, max_length=96)
     occurred_at: Optional[str] = Field(default=None, max_length=40)
@@ -106,11 +106,11 @@ class CoachingHelperActionIn(BaseModel):
     payload: Optional[Dict[str, Any]] = None
 
 
-class CoachingHelperStreamIn(BaseModel):
+class ReadingCoachStreamIn(BaseModel):
     day_number: int = Field(..., ge=1, le=366)
     locale: str = Field(default="en", min_length=2, max_length=8)
     paragraph_index: int = Field(default=0, ge=0, le=50)
-    recent_actions: List[CoachingHelperActionIn] = Field(default_factory=list)
+    recent_actions: List[ReadingCoachActionIn] = Field(default_factory=list)
 
 
 class ReadingCoachSelectionIn(BaseModel):
@@ -122,14 +122,14 @@ class ReadingCoachSelectionIn(BaseModel):
     user_level: Optional[str] = Field(default=None, max_length=32)
 
 
-class CoachingHelperNoteIn(BaseModel):
+class ReadingCoachNoteIn(BaseModel):
     day_number: int = Field(..., ge=1, le=366)
     locale: str = Field(default="en", min_length=2, max_length=8)
     paragraph_index: int = Field(default=0, ge=0, le=50)
     visible_paragraph_indexes: List[int] = Field(default_factory=list)
     reading_selection: Optional[ReadingCoachSelectionIn] = None
     reading_state: Optional[Dict[str, Any]] = None
-    recent_actions: List[CoachingHelperActionIn] = Field(default_factory=list)
+    recent_actions: List[ReadingCoachActionIn] = Field(default_factory=list)
 
 
 @router.get("/plan")
@@ -266,7 +266,7 @@ async def coaching_explain(
 
 @router.post("/reading/helper-stream")
 async def coaching_helper_stream(
-    payload: CoachingHelperStreamIn,
+    payload: ReadingCoachStreamIn,
     user: CurrentUser = Depends(get_current_user),
     pg: AsyncSession = Depends(get_pg),
 ):
@@ -301,7 +301,7 @@ async def coaching_helper_stream(
 
 @router.post("/reading/helper-note")
 async def coaching_helper_note(
-    payload: CoachingHelperNoteIn,
+    payload: ReadingCoachNoteIn,
     user: CurrentUser = Depends(get_current_user),
     pg: AsyncSession = Depends(get_pg),
 ):

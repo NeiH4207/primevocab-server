@@ -1,9 +1,8 @@
-"""Real Cambridge-style reading content for vocab coaching.
+"""Legacy Cambridge-style reading helpers (reference only).
 
-Days 1–12 use passages extracted from Cambridge IELTS 10 (Boost your vocabulary
-PDF). Day 1 keeps hand-curated stepwells paragraphs plus authored comprehension
-questions; later days ship passage text and rely on lexeme lookups / LLM for
-questions.
+Runtime coaching content is resolved from the Postgres catalog via
+``aiforen.domain.coaching_content``. This module keeps token/sentence helpers
+used by Reading Coach and tests.
 """
 
 from __future__ import annotations
@@ -243,7 +242,7 @@ def find_sentence(phrase: str, day_number: int = 1) -> str:
 def build_reading_payload(
     difficult_words: List[Dict[str, Any]], *, day_number: int = 1
 ) -> Dict[str, Any]:
-    """Assemble the stored reading JSON for a coaching day."""
+    """Deprecated: legacy Cambridge payload kept for reference/tests only."""
     seed = get_reading_seed(day_number)
     questions = list(STEPWELLS_QUESTIONS) if day_number == 1 else []
     paragraphs = (

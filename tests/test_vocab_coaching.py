@@ -32,8 +32,10 @@ from aiforen.services.vocab_coaching_service import (
     TOTAL_DAYS,
     VocabCoachingService,
     _cefr_offset,
+    _coaching_word_meets_plan_level,
     _confidence_pct,
     _ielts_band,
+    _reading_vocab_candidates_stale,
 )
 
 
@@ -75,6 +77,21 @@ def test_curated_words_present_in_passage():
 
 
 # ------------------------------------------------------------ service helpers
+def test_coaching_word_meets_plan_level_for_b2():
+    assert _coaching_word_meets_plan_level("B1", "B2") is True
+    assert _coaching_word_meets_plan_level("B2", "B2") is True
+    assert _coaching_word_meets_plan_level("C1", "B2") is True
+    assert _coaching_word_meets_plan_level("A1", "B2") is False
+    assert _coaching_word_meets_plan_level("A2", "B2") is False
+
+
+def test_reading_vocab_candidates_stale_detects_a1_for_b2():
+    stale = [{"word": "city", "cefr": "A1", "quiz_steps": [{}]}]
+    fresh = [{"word": "shade", "cefr": "C1", "quiz_steps": [{}]}]
+    assert _reading_vocab_candidates_stale(stale, "B2") is True
+    assert _reading_vocab_candidates_stale(fresh, "B2") is False
+
+
 def test_cefr_offset_clamps():
     assert _cefr_offset("B1", 1) == "B2"
     assert _cefr_offset("B1", -1) == "A2"

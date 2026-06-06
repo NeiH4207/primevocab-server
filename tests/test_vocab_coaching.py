@@ -255,6 +255,23 @@ def test_reading_coach_cache_key_stable():
     )
 
 
+def test_reading_coach_cache_key_differs_by_sentence():
+    base = dict(
+        reading_id="cambridge10-stepwells",
+        selection_type="word",
+        selected_text="neglected",
+        sentence_text="They were neglected for centuries.",
+        locale="vi",
+        user_level="B2",
+        model_name="gpt-5.5-2026-04-23",
+    )
+    key_a, _ = build_reading_coach_cache_key(**base)
+    key_b, _ = build_reading_coach_cache_key(
+        **{**base, "sentence_text": "Recent restoration has returned them."}
+    )
+    assert key_a != key_b
+
+
 def test_reading_coach_cache_key_differs_by_level():
     base = dict(
         reading_id="cambridge10-stepwells",

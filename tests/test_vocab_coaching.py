@@ -16,6 +16,10 @@ from aiforen.domain.vocab_coaching_reading import (
     passage_text,
     passage_tokens,
 )
+from aiforen.domain.vocab_coaching_readings_data import (
+    READING_DAY_COUNT,
+    get_reading_seed,
+)
 from aiforen.integrations.llm.json_utils import (
     build_reading_questions_prompt,
     normalize_coaching_notes_payload,
@@ -28,8 +32,10 @@ from aiforen.services.vocab_coaching_service import (
     TOTAL_DAYS,
     VocabCoachingService,
     _cefr_offset,
+    _coaching_word_meets_plan_level,
     _confidence_pct,
     _ielts_band,
+    _reading_vocab_candidates_stale,
 )
 
 
@@ -48,13 +54,18 @@ def test_find_sentence_locates_phrase():
 
 def test_build_reading_payload_shape():
     difficult = [{"word": "aquifer", "cefr": "C1", "band": 7.5, "in_db": False}]
-    payload = build_reading_payload(difficult)
-    assert payload["id"] == "cambridge10-stepwells"
+    payload = build_reading_payload(difficult, day_number=1)
+    assert payload["id"] == "cambridge10-test1-passage1"
     assert len(payload["paragraphs"]) >= 10
     assert payload["difficult_words"] == difficult
     assert len(payload["questions"]) >= 4
     for question in payload["questions"]:
         assert question["correct_option"] in question["options"]
+
+    day_two = build_reading_payload([], day_number=2)
+    assert day_two["id"] == "cambridge10-test1-passage2"
+    assert len(day_two["paragraphs"]) >= 5
+    assert day_two["questions"] == []
 
 
 def test_curated_words_present_in_passage():
@@ -66,6 +77,21 @@ def test_curated_words_present_in_passage():
 
 
 # ------------------------------------------------------------ service helpers
+def test_coaching_word_meets_plan_level_for_b2():
+    assert _coaching_word_meets_plan_level("B1", "B2") is True
+    assert _coaching_word_meets_plan_level("B2", "B2") is True
+    assert _coaching_word_meets_plan_level("C1", "B2") is True
+    assert _coaching_word_meets_plan_level("A1", "B2") is False
+    assert _coaching_word_meets_plan_level("A2", "B2") is False
+
+
+def test_reading_vocab_candidates_stale_detects_a1_for_b2():
+    stale = [{"word": "city", "cefr": "A1", "quiz_steps": [{}]}]
+    fresh = [{"word": "shade", "cefr": "C1", "quiz_steps": [{}]}]
+    assert _reading_vocab_candidates_stale(stale, "B2") is True
+    assert _reading_vocab_candidates_stale(fresh, "B2") is False
+
+
 def test_cefr_offset_clamps():
     assert _cefr_offset("B1", 1) == "B2"
     assert _cefr_offset("B1", -1) == "A2"
@@ -88,6 +114,8 @@ def test_confidence_pct_normalizes_fraction_and_percent():
 
 def test_total_days_and_levels():
     assert TOTAL_DAYS == 31
+    assert READING_DAY_COUNT == 12
+    assert len(get_reading_seed(12)["paragraphs"]) >= 5
     assert CEFR_LEVELS[:2] == ["A1", "A2"]
 
 
@@ -252,6 +280,61 @@ def test_reading_coach_cache_key_stable():
     assert (
         build_reading_coach_cache_key(**kwargs)[0]
         == build_reading_coach_cache_key(**kwargs)[0]
+    )
+
+
+def test_reading_coach_cache_key_differs_by_sentence():
+    base = dict(
+        reading_id="cambridge10-stepwells",
+        selection_type="word",
+        selected_text="neglected",
+        sentence_text="They were neglected for centuries.",
+        locale="vi",
+        user_level="B2",
+        model_name="gpt-5.5-2026-04-23",
+    )
+    key_a, _ = build_reading_coach_cache_key(**base)
+    key_b, _ = build_reading_coach_cache_key(
+        **{**base, "sentence_text": "Recent restoration has returned them."}
+    )
+    assert key_a != key_b
+
+
+def test_align_reading_coach_card_rejects_sentence_card_for_word_selection():
+    from aiforen.integrations.llm.json_utils import (
+        align_reading_coach_card_to_selection,
+        normalize_reading_helper_note_payload,
+    )
+
+    sentence_card = normalize_reading_helper_note_payload(
+        {
+            "noteType": "sentence_breakdown",
+            "priority": 5,
+            "shouldShow": True,
+            "title": "Phrase breakdown",
+            "targetText": "Richard Cox travelled to north-western India.",
+            "meaningVi": "full sentence meaning",
+            "mainNoteVi": "sentence map note",
+        }
+    )
+    assert sentence_card["card_type"] == "phrase_breakdown"
+
+    aligned = align_reading_coach_card_to_selection(
+        sentence_card,
+        reading_selection={
+            "selection_type": "word",
+            "selected_text": "monuments",
+            "sentence_text": "Richard Cox travelled to document these spectacular monuments.",
+        },
+        locale="en",
+    )
+    assert aligned["card_type"] == "vocab_context"
+    assert aligned["note_type"] == "word_coach"
+    target = aligned.get("target") or {}
+    assert (
+        str(target.get("word") or target.get("text") or "")
+        .lower()
+        .startswith("monument")
     )
 
 

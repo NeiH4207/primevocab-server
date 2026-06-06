@@ -459,3 +459,81 @@ async def _repair_vocab_coaching(conn) -> None:
             )
         )
         logger.info("schema_repair: created reading_coach_note_cache")
+
+    if not await _table_exists(conn, "coaching_reading_units"):
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE coaching_reading_units (
+                  id VARCHAR(64) PRIMARY KEY,
+                  cefr_level VARCHAR(8) NOT NULL,
+                  day_number INTEGER NOT NULL,
+                  topic_slug VARCHAR(64) NOT NULL,
+                  topic_title VARCHAR(256) NOT NULL,
+                  title VARCHAR(256) NOT NULL,
+                  paragraphs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                  estimated_minutes INTEGER NOT NULL DEFAULT 8,
+                  source_label VARCHAR(128) NOT NULL,
+                  question_limit INTEGER NOT NULL DEFAULT 7,
+                  content_version INTEGER NOT NULL DEFAULT 1,
+                  status VARCHAR(16) NOT NULL DEFAULT 'draft',
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX ix_coaching_reading_unit_lookup "
+                "ON coaching_reading_units (cefr_level, day_number, status)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_coaching_reading_unit_published "
+                "ON coaching_reading_units (cefr_level, day_number) "
+                "WHERE status = 'published'"
+            )
+        )
+        logger.info("schema_repair: created coaching_reading_units")
+
+    if await _table_exists(conn, "coaching_reading_units"):
+        unit_cols = await _table_columns(conn, "coaching_reading_units")
+        if "vocab_keywords" not in unit_cols:
+            await conn.execute(
+                text(
+                    "ALTER TABLE coaching_reading_units "
+                    "ADD COLUMN vocab_keywords JSONB NOT NULL DEFAULT '[]'::jsonb"
+                )
+            )
+            logger.info("schema_repair: added coaching_reading_units.vocab_keywords")
+
+    if not await _table_exists(conn, "coaching_reading_unit_questions"):
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE coaching_reading_unit_questions (
+                  id VARCHAR(64) PRIMARY KEY,
+                  unit_id VARCHAR(64) NOT NULL
+                    REFERENCES coaching_reading_units(id) ON DELETE CASCADE,
+                  sort_order INTEGER NOT NULL,
+                  question_type VARCHAR(32) NOT NULL,
+                  prompt TEXT NOT NULL,
+                  options JSONB,
+                  correct_option TEXT NOT NULL,
+                  acceptable_answers JSONB,
+                  explanation TEXT,
+                  source_word VARCHAR(64),
+                  UNIQUE (unit_id, sort_order)
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX ix_coaching_reading_question_unit "
+                "ON coaching_reading_unit_questions (unit_id, sort_order)"
+            )
+        )
+        logger.info("schema_repair: created coaching_reading_unit_questions")

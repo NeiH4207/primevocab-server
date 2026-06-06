@@ -18,6 +18,13 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 from loguru import logger
 
 from aiforen.core.config import get_settings
+from aiforen.domain.coaching_content import (
+    grade_reading_answer,
+    passage_tokens_from_paragraphs,
+    placeholder_reading,
+    should_refresh_reading_snapshot,
+    unit_to_reading_payload,
+)
 from aiforen.domain.reading_coach_cache import (
     READING_COACH_PROMPT_VERSION,
     cache_key_from_selection,
@@ -26,13 +33,12 @@ from aiforen.domain.reading_coach_cache import (
 from aiforen.domain.sql_models import VocabCoachingDay, VocabCoachingPlan
 from aiforen.domain.vocab_coaching_reading import (
     CURATED_DIFFICULT_WORDS,
-    build_reading_payload,
     find_sentence,
     normalize_token,
-    passage_tokens,
 )
 from aiforen.integrations.llm import get_llm_provider
 from aiforen.integrations.llm.json_utils import (
+    align_reading_coach_card_to_selection,
     build_reading_helper_note_messages,
     build_reading_helper_prompt,
     extract_json,
@@ -48,6 +54,7 @@ from aiforen.integrations.llm.openai_chat import (
     openai_chat_completion_text,
 )
 from aiforen.integrations.translate import get_translate_client
+from aiforen.repositories.pg.coaching_content import CoachingContentRepo
 from aiforen.repositories.pg.user_stats import VN_TZ, UserStatsRepo
 from aiforen.repositories.pg.vocab_coaching import VocabCoachingRepo
 from aiforen.repositories.pg.vocab_lexicon import VocabLexiconRepo
@@ -175,6 +182,31 @@ def _role_for_level(word_cefr: Optional[str], plan_cefr: str) -> str:
     return "current"
 
 
+def _coaching_vocab_min_index(plan_cefr: str) -> int:
+    """Focus/reading pool may include one CEFR band below the learner plan."""
+    return max(0, _cefr_index(plan_cefr) - 1)
+
+
+def _coaching_word_meets_plan_level(word_cefr: Optional[str], plan_cefr: str) -> bool:
+    if not word_cefr:
+        return True
+    try:
+        return _cefr_index(word_cefr) >= _coaching_vocab_min_index(plan_cefr)
+    except ValueError:
+        return True
+
+
+def _reading_vocab_candidates_stale(candidates: Sequence[Any], plan_cefr: str) -> bool:
+    min_idx = _coaching_vocab_min_index(plan_cefr)
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        cefr = item.get("cefr")
+        if cefr and _cefr_index(str(cefr)) < min_idx:
+            return True
+    return False
+
+
 def _confidence_pct(value: Any) -> float:
     try:
         num = float(value)
@@ -189,6 +221,7 @@ class VocabCoachingService:
     def __init__(self, session):
         self.s = session
         self.repo = VocabCoachingRepo(session)
+        self.content_repo = CoachingContentRepo(session)
         self.stats = UserStatsRepo(session)
         self.lexicon = VocabLexiconRepo(session)
 
@@ -332,19 +365,63 @@ class VocabCoachingService:
             mutated = True
 
         reading = dict(day.reading or {})
-        if not reading:
-            difficult = await self._detect_difficult_words(plan.cefr_level)
-            reading = build_reading_payload(difficult)
+        sessions = dict(day.sessions or {})
+        workspace = (
+            dict(sessions.get("workspace") or {})
+            if isinstance(sessions.get("workspace"), dict)
+            else {}
+        )
+        reading_answers = (
+            workspace.get("reading_answers")
+            if isinstance(workspace.get("reading_answers"), dict)
+            else {}
+        )
+        reading_status = (sessions.get("reading") or {}).get("status")
+
+        unit = await self.content_repo.get_published_unit(
+            plan.cefr_level, day.day_number
+        )
+        if unit is not None:
+            paragraphs = list(unit.paragraphs or [])
+            difficult = await self._detect_difficult_words(
+                plan.cefr_level, paragraphs=paragraphs
+            )
+            if not reading or should_refresh_reading_snapshot(
+                reading,
+                unit,
+                reading_answers=reading_answers,
+                reading_status=reading_status,
+            ):
+                reading = unit_to_reading_payload(unit, difficult)
+                mutated = True
+        elif not reading or (
+            not reading.get("placeholder")
+            and not reading_answers
+            and reading_status != "completed"
+        ):
+            reading = placeholder_reading(plan.cefr_level, day.day_number)
             mutated = True
 
-        if not reading.get("vocab_candidates"):
+        unit_seeds = list(unit.vocab_keywords or []) if unit is not None else []
+        stored_seeds = reading.get("vocab_keyword_seeds") or []
+        if unit is not None and stored_seeds != unit_seeds:
+            reading["vocab_keyword_seeds"] = unit_seeds
+            mutated = True
+
+        candidates = reading.get("vocab_candidates") or []
+        if (
+            not candidates
+            or _reading_vocab_candidates_stale(candidates, plan.cefr_level)
+            or (unit is not None and stored_seeds != unit_seeds)
+        ):
             reading["vocab_candidates"] = await self._build_reading_vocab_candidates(
                 plan.cefr_level,
-                reading.get("difficult_words") or [],
-                day.words or [],
+                keyword_seeds=reading.get("vocab_keyword_seeds") or [],
             )
-            day.reading = reading
             mutated = True
+
+        if mutated:
+            day.reading = reading
 
         if not day.sessions:
             day.sessions = {
@@ -382,56 +459,48 @@ class VocabCoachingService:
     async def _build_reading_vocab_candidates(
         self,
         cefr: str,
-        difficult_words: Sequence[Dict[str, Any]],
-        fallback_words: Sequence[Dict[str, Any]],
+        *,
+        keyword_seeds: Sequence[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Quiz-ready vocab pool seeded by the reading passage itself."""
-        priority_tokens: List[str] = []
-        for item in difficult_words:
-            token = normalize_token(str(item.get("word") or ""))
-            if token:
-                priority_tokens.append(token)
-        priority_tokens.extend(passage_tokens())
+        """Resolve curator-picked keywords from DB; skip lemmas that are missing or not quiz-ready."""
+        if not keyword_seeds:
+            return []
 
-        briefs = await self.repo.lexemes_for_lemmas(
-            priority_tokens, limit=FOCUS_PLAN_SEED_LIMIT, require_quiz=True
-        )
         out: List[Dict[str, Any]] = []
         seen: set[str] = set()
 
-        async def add_word(
-            item: Dict[str, Any], source_role: Optional[str] = None
-        ) -> None:
+        for seed in keyword_seeds:
+            if not isinstance(seed, dict):
+                continue
+            lemma = normalize_token(str(seed.get("lemma") or seed.get("word") or ""))
+            if not lemma or lemma in seen:
+                continue
+            seen.add(lemma)
+
+            briefs = await self.repo.lexemes_for_lemmas(
+                [lemma], limit=1, require_quiz=True
+            )
+            if not briefs:
+                logger.debug("coaching vocab seed skipped (not in DB): {}", lemma)
+                continue
+
+            brief = dict(briefs[0])
+            if seed.get("vi_gloss"):
+                brief["vi_gloss"] = seed["vi_gloss"]
+            if seed.get("pos"):
+                brief["pos"] = seed["pos"]
+
             enriched = await self._enrich_coaching_word(
                 {
-                    **item,
-                    "role": source_role
-                    or item.get("role")
-                    or _role_for_level(item.get("cefr"), cefr),
+                    **brief,
+                    "role": _role_for_level(brief.get("cefr"), cefr),
                 }
             )
             key = _coaching_word_key(enriched)
-            if not key or key in seen or not _coaching_word_has_quiz(enriched):
-                return
-            seen.add(key)
+            if not key or not _coaching_word_has_quiz(enriched):
+                logger.debug("coaching vocab seed skipped (no quiz): {}", lemma)
+                continue
             out.append(enriched)
-
-        for brief in briefs:
-            await add_word(brief)
-            if len(out) >= FOCUS_PLAN_SEED_LIMIT:
-                break
-
-        for word in fallback_words:
-            if len(out) >= FOCUS_PLAN_MAX_WORDS:
-                break
-            await add_word(word, str(word.get("role") or "current"))
-
-        if len(out) < FOCUS_PLAN_MIN_WORDS:
-            fillers = await self._build_word_mix(cefr)
-            for word in fillers:
-                if len(out) >= FOCUS_PLAN_MIN_WORDS:
-                    break
-                await add_word(word, str(word.get("role") or "current"))
 
         return out[:FOCUS_PLAN_SEED_LIMIT]
 
@@ -603,8 +672,14 @@ class VocabCoachingService:
             "quiz_track_id": track_id,
         }
 
-    async def _detect_difficult_words(self, cefr: str) -> List[Dict[str, Any]]:
-        tokens = passage_tokens()
+    async def _detect_difficult_words(
+        self,
+        cefr: str,
+        *,
+        paragraphs: Optional[Sequence[str]] = None,
+        day_number: int = 1,
+    ) -> List[Dict[str, Any]]:
+        tokens = passage_tokens_from_paragraphs(paragraphs) if paragraphs else []
         db_levels = await self.repo.detect_levels_for_tokens(tokens)
         stretch_idx = _cefr_index(cefr) + 1
         out: List[Dict[str, Any]] = []
@@ -988,6 +1063,8 @@ class VocabCoachingService:
         for item in forgotten_words:
             add_word(item, FOCUS_SOURCE_FORGOTTEN, FOCUS_SIGNAL_SCORES["forgotten"])
         for item in reading_candidates:
+            if not _coaching_word_meets_plan_level(item.get("cefr"), plan.cefr_level):
+                continue
             add_word(item, FOCUS_SOURCE_READING, FOCUS_SIGNAL_SCORES["reading_seed"])
         for item in fallback_words:
             add_word(item, FOCUS_SOURCE_FALLBACK, 0)
@@ -1133,7 +1210,7 @@ class VocabCoachingService:
         by_id = {str(q.get("id") or ""): q for q in questions if isinstance(q, dict)}
         for question_id, selected in reading_answers.items():
             question = by_id.get(str(question_id))
-            if not question or selected == question.get("correct_option"):
+            if not question or grade_reading_answer(question, str(selected)):
                 continue
             source_word = question.get("source_word")
             for token in _text_candidate_tokens(source_word):
@@ -1315,6 +1392,12 @@ class VocabCoachingService:
                     cache_parts.get("reading_id"),
                     cache_parts.get("selection_type"),
                 )
+                cached_card = align_reading_coach_card_to_selection(
+                    cached_card,
+                    reading_selection=reading_selection,
+                    locale=locale,
+                    context=context,
+                )
                 return self._reading_coach_card_response(cached_card)
             logger.info(
                 "reading_coach_cache miss cache_key={} reading_id={}",
@@ -1337,6 +1420,12 @@ class VocabCoachingService:
                 )
                 if raw:
                     card = normalize_reading_helper_note_payload(extract_json(raw))
+                    card = align_reading_coach_card_to_selection(
+                        card,
+                        reading_selection=reading_selection,
+                        locale=locale,
+                        context=context,
+                    )
                     if cache_bundle and is_cacheable_reading_coach_card(card):
                         cache_key, cache_parts = cache_bundle
                         sel = reading_selection or {}
@@ -1380,6 +1469,12 @@ class VocabCoachingService:
             bool(api_key),
         )
         card = mock_reading_helper_note(context=context)
+        card = align_reading_coach_card_to_selection(
+            card,
+            reading_selection=reading_selection,
+            locale=locale,
+            context=context,
+        )
         return self._reading_coach_card_response(card)
 
     # =============================================================== translate
@@ -1475,10 +1570,15 @@ class VocabCoachingService:
         if day is None:
             raise ValueError("Day not found")
         await self._ensure_day_content(plan, day)
-        signals = await self._action_signals(plan.id, day_number)
         reading = day.reading or {}
+        question_limit = int(reading.get("question_limit") or 4)
+        seeded = reading.get("questions") or []
+        if len(seeded) >= question_limit:
+            return {"questions": reading.get("ai_questions") or []}
+
+        signals = await self._action_signals(plan.id, day_number)
         difficult = reading.get("difficult_words") or []
-        fallback = reading.get("questions") or []
+        fallback = seeded
         passage = "\n\n".join(str(p) for p in (reading.get("paragraphs") or []))
         context = {
             "level": plan.cefr_level,

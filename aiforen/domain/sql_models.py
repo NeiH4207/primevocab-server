@@ -1330,6 +1330,98 @@ class VocabCoachingEvent(Base):
     )
 
 
+class CoachingReadingUnit(Base):
+    """Published reading passage catalog keyed by CEFR level and coaching day."""
+
+    __tablename__ = "coaching_reading_units"
+    __table_args__ = (
+        Index(
+            "ix_coaching_reading_unit_lookup",
+            "cefr_level",
+            "day_number",
+            "status",
+        ),
+        Index(
+            "uq_coaching_reading_unit_published",
+            "cefr_level",
+            "day_number",
+            unique=True,
+            postgresql_where=Column("status") == "published",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cefr_level: Mapped[str] = mapped_column(String(8), nullable=False)
+    day_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    topic_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    topic_title: Mapped[str] = mapped_column(String(256), nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    paragraphs: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    estimated_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="8"
+    )
+    source_label: Mapped[str] = mapped_column(String(128), nullable=False)
+    question_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="7"
+    )
+    content_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    vocab_keywords: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="draft"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    questions: Mapped[List["CoachingReadingUnitQuestion"]] = relationship(
+        "CoachingReadingUnitQuestion",
+        back_populates="unit",
+        cascade="all, delete-orphan",
+        order_by="CoachingReadingUnitQuestion.sort_order",
+    )
+
+
+class CoachingReadingUnitQuestion(Base):
+    __tablename__ = "coaching_reading_unit_questions"
+    __table_args__ = (
+        UniqueConstraint(
+            "unit_id", "sort_order", name="uq_coaching_reading_question_order"
+        ),
+        Index("ix_coaching_reading_question_unit", "unit_id", "sort_order"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    unit_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("coaching_reading_units.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    question_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    options: Mapped[Optional[List[str]]] = mapped_column(JSONB)
+    correct_option: Mapped[str] = mapped_column(Text, nullable=False)
+    acceptable_answers: Mapped[Optional[List[str]]] = mapped_column(JSONB)
+    explanation: Mapped[Optional[str]] = mapped_column(Text)
+    source_word: Mapped[Optional[str]] = mapped_column(String(64))
+
+    unit: Mapped["CoachingReadingUnit"] = relationship(
+        "CoachingReadingUnit", back_populates="questions"
+    )
+
+
 class ReadingCoachNoteCache(Base):
     """Shared LLM cards for word/sentence Reading Coach selections."""
 

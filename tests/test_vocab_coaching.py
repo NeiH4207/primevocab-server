@@ -16,6 +16,10 @@ from aiforen.domain.vocab_coaching_reading import (
     passage_text,
     passage_tokens,
 )
+from aiforen.domain.vocab_coaching_readings_data import (
+    READING_DAY_COUNT,
+    get_reading_seed,
+)
 from aiforen.integrations.llm.json_utils import (
     build_reading_questions_prompt,
     normalize_coaching_notes_payload,
@@ -48,13 +52,18 @@ def test_find_sentence_locates_phrase():
 
 def test_build_reading_payload_shape():
     difficult = [{"word": "aquifer", "cefr": "C1", "band": 7.5, "in_db": False}]
-    payload = build_reading_payload(difficult)
-    assert payload["id"] == "cambridge10-stepwells"
+    payload = build_reading_payload(difficult, day_number=1)
+    assert payload["id"] == "cambridge10-test1-passage1"
     assert len(payload["paragraphs"]) >= 10
     assert payload["difficult_words"] == difficult
     assert len(payload["questions"]) >= 4
     for question in payload["questions"]:
         assert question["correct_option"] in question["options"]
+
+    day_two = build_reading_payload([], day_number=2)
+    assert day_two["id"] == "cambridge10-test1-passage2"
+    assert len(day_two["paragraphs"]) >= 5
+    assert day_two["questions"] == []
 
 
 def test_curated_words_present_in_passage():
@@ -88,6 +97,8 @@ def test_confidence_pct_normalizes_fraction_and_percent():
 
 def test_total_days_and_levels():
     assert TOTAL_DAYS == 31
+    assert READING_DAY_COUNT == 12
+    assert len(get_reading_seed(12)["paragraphs"]) >= 5
     assert CEFR_LEVELS[:2] == ["A1", "A2"]
 
 

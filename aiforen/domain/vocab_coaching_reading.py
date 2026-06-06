@@ -1,9 +1,9 @@
 """Real Cambridge-style reading content for vocab coaching.
 
-The Day 1 passage is the Cambridge IELTS 10 "stepwells of India" reading. It is
-stored pre-split into paragraphs so the frontend can render a clean, readable
-column, and it ships with authored comprehension questions plus a curated
-over-band difficult-word list used as a fallback when DB lexeme lookups are thin.
+Days 1–12 use passages extracted from Cambridge IELTS 10 (Boost your vocabulary
+PDF). Day 1 keeps hand-curated stepwells paragraphs plus authored comprehension
+questions; later days ship passage text and rely on lexeme lookups / LLM for
+questions.
 """
 
 from __future__ import annotations
@@ -11,7 +11,9 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-# Ordered paragraphs reconstructed from the source passage.
+from aiforen.domain.vocab_coaching_readings_data import get_reading_seed
+
+# Hand-curated Day 1 paragraphs (source of truth; also written into readings_data).
 STEPWELLS_PARAGRAPHS: List[str] = [
     "A millennium ago, stepwells were fundamental to life in the driest parts of "
     "India. Although many have been neglected, recent restoration has returned them "
@@ -89,8 +91,8 @@ STEPWELLS_PARAGRAPHS: List[str] = [
     "existence.",
 ]
 
-# Curated over-band vocabulary for this passage with a CEFR/IELTS hint. Used as a
-# fallback / union with DB lexeme lookups so flagged words are always meaningful.
+# Curated over-band vocabulary for Day 1 stepwells. Used as a fallback / union
+# with DB lexeme lookups so flagged words are always meaningful.
 CURATED_DIFFICULT_WORDS: Dict[str, Dict[str, Any]] = {
     "millennium": {"cefr": "C1", "band": 7.0},
     "neglected": {"cefr": "B2", "band": 6.5},
@@ -129,7 +131,7 @@ CURATED_DIFFICULT_WORDS: Dict[str, Dict[str, Any]] = {
     "artistry": {"cefr": "C1", "band": 7.0},
 }
 
-# Authored comprehension / vocabulary / context questions for the passage.
+# Authored comprehension / vocabulary / context questions for Day 1 only.
 STEPWELLS_QUESTIONS: List[Dict[str, Any]] = [
     {
         "id": "rq-purpose",
@@ -208,15 +210,18 @@ def normalize_token(value: str) -> str:
     return re.sub(r"[^a-z'-]", "", (value or "").strip().lower())
 
 
-def passage_text() -> str:
-    return "\n\n".join(STEPWELLS_PARAGRAPHS)
+def passage_text(day_number: int = 1) -> str:
+    if day_number == 1:
+        return "\n\n".join(STEPWELLS_PARAGRAPHS)
+    seed = get_reading_seed(day_number)
+    return "\n\n".join(seed["paragraphs"])
 
 
-def passage_tokens() -> List[str]:
+def passage_tokens(day_number: int = 1) -> List[str]:
     """Unique lowercase word tokens in passage order."""
     seen: set[str] = set()
     out: List[str] = []
-    for match in _TOKEN_RE.finditer(passage_text()):
+    for match in _TOKEN_RE.finditer(passage_text(day_number)):
         token = normalize_token(match.group(0))
         if len(token) < 3 or token in seen:
             continue
@@ -225,24 +230,31 @@ def passage_tokens() -> List[str]:
     return out
 
 
-def find_sentence(phrase: str) -> str:
+def find_sentence(phrase: str, day_number: int = 1) -> str:
     clean = (phrase or "").strip().lower()
     if not clean:
         return ""
-    for sentence in _SENT_RE.findall(passage_text()):
+    for sentence in _SENT_RE.findall(passage_text(day_number)):
         if clean in sentence.lower():
             return sentence.strip()
     return (phrase or "").strip()
 
 
-def build_reading_payload(difficult_words: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_reading_payload(
+    difficult_words: List[Dict[str, Any]], *, day_number: int = 1
+) -> Dict[str, Any]:
     """Assemble the stored reading JSON for a coaching day."""
+    seed = get_reading_seed(day_number)
+    questions = list(STEPWELLS_QUESTIONS) if day_number == 1 else []
+    paragraphs = (
+        list(STEPWELLS_PARAGRAPHS) if day_number == 1 else list(seed["paragraphs"])
+    )
     return {
-        "id": "cambridge10-stepwells",
-        "title": "The stepwells of India",
-        "source_label": "Cambridge IELTS 10 · Reading",
-        "estimated_minutes": 8,
-        "paragraphs": list(STEPWELLS_PARAGRAPHS),
+        "id": seed["id"],
+        "title": seed["title"],
+        "source_label": seed["source_label"],
+        "estimated_minutes": seed["estimated_minutes"],
+        "paragraphs": paragraphs,
         "difficult_words": difficult_words,
-        "questions": list(STEPWELLS_QUESTIONS),
+        "questions": questions,
     }

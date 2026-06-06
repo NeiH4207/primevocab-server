@@ -334,8 +334,10 @@ class VocabCoachingService:
 
         reading = dict(day.reading or {})
         if not reading:
-            difficult = await self._detect_difficult_words(plan.cefr_level)
-            reading = build_reading_payload(difficult)
+            difficult = await self._detect_difficult_words(
+                plan.cefr_level, day.day_number
+            )
+            reading = build_reading_payload(difficult, day_number=day.day_number)
             mutated = True
 
         if not reading.get("vocab_candidates"):
@@ -343,6 +345,7 @@ class VocabCoachingService:
                 plan.cefr_level,
                 reading.get("difficult_words") or [],
                 day.words or [],
+                day_number=day.day_number,
             )
             day.reading = reading
             mutated = True
@@ -385,6 +388,8 @@ class VocabCoachingService:
         cefr: str,
         difficult_words: Sequence[Dict[str, Any]],
         fallback_words: Sequence[Dict[str, Any]],
+        *,
+        day_number: int = 1,
     ) -> List[Dict[str, Any]]:
         """Quiz-ready vocab pool seeded by the reading passage itself."""
         priority_tokens: List[str] = []
@@ -392,7 +397,7 @@ class VocabCoachingService:
             token = normalize_token(str(item.get("word") or ""))
             if token:
                 priority_tokens.append(token)
-        priority_tokens.extend(passage_tokens())
+        priority_tokens.extend(passage_tokens(day_number))
 
         briefs = await self.repo.lexemes_for_lemmas(
             priority_tokens, limit=FOCUS_PLAN_SEED_LIMIT, require_quiz=True
@@ -604,14 +609,16 @@ class VocabCoachingService:
             "quiz_track_id": track_id,
         }
 
-    async def _detect_difficult_words(self, cefr: str) -> List[Dict[str, Any]]:
-        tokens = passage_tokens()
+    async def _detect_difficult_words(
+        self, cefr: str, day_number: int = 1
+    ) -> List[Dict[str, Any]]:
+        tokens = passage_tokens(day_number)
         db_levels = await self.repo.detect_levels_for_tokens(tokens)
         stretch_idx = _cefr_index(cefr) + 1
         out: List[Dict[str, Any]] = []
         for token in tokens:
             info = db_levels.get(token)
-            curated = CURATED_DIFFICULT_WORDS.get(token)
+            curated = CURATED_DIFFICULT_WORDS.get(token) if day_number == 1 else None
             cefr_tok = (info or {}).get("cefr") or (curated or {}).get("cefr")
             band_tok = (info or {}).get("ielts_band_min") or (curated or {}).get("band")
             flagged = False

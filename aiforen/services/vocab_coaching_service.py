@@ -33,6 +33,7 @@ from aiforen.domain.vocab_coaching_reading import (
 )
 from aiforen.integrations.llm import get_llm_provider
 from aiforen.integrations.llm.json_utils import (
+    align_reading_coach_card_to_selection,
     build_reading_helper_note_messages,
     build_reading_helper_prompt,
     extract_json,
@@ -1315,6 +1316,12 @@ class VocabCoachingService:
                     cache_parts.get("reading_id"),
                     cache_parts.get("selection_type"),
                 )
+                cached_card = align_reading_coach_card_to_selection(
+                    cached_card,
+                    reading_selection=reading_selection,
+                    locale=locale,
+                    context=context,
+                )
                 return self._reading_coach_card_response(cached_card)
             logger.info(
                 "reading_coach_cache miss cache_key={} reading_id={}",
@@ -1337,6 +1344,12 @@ class VocabCoachingService:
                 )
                 if raw:
                     card = normalize_reading_helper_note_payload(extract_json(raw))
+                    card = align_reading_coach_card_to_selection(
+                        card,
+                        reading_selection=reading_selection,
+                        locale=locale,
+                        context=context,
+                    )
                     if cache_bundle and is_cacheable_reading_coach_card(card):
                         cache_key, cache_parts = cache_bundle
                         sel = reading_selection or {}
@@ -1380,6 +1393,12 @@ class VocabCoachingService:
             bool(api_key),
         )
         card = mock_reading_helper_note(context=context)
+        card = align_reading_coach_card_to_selection(
+            card,
+            reading_selection=reading_selection,
+            locale=locale,
+            context=context,
+        )
         return self._reading_coach_card_response(card)
 
     # =============================================================== translate

@@ -272,6 +272,44 @@ def test_reading_coach_cache_key_differs_by_sentence():
     assert key_a != key_b
 
 
+def test_align_reading_coach_card_rejects_sentence_card_for_word_selection():
+    from aiforen.integrations.llm.json_utils import (
+        align_reading_coach_card_to_selection,
+        normalize_reading_helper_note_payload,
+    )
+
+    sentence_card = normalize_reading_helper_note_payload(
+        {
+            "noteType": "sentence_breakdown",
+            "priority": 5,
+            "shouldShow": True,
+            "title": "Phrase breakdown",
+            "targetText": "Richard Cox travelled to north-western India.",
+            "meaningVi": "full sentence meaning",
+            "mainNoteVi": "sentence map note",
+        }
+    )
+    assert sentence_card["card_type"] == "phrase_breakdown"
+
+    aligned = align_reading_coach_card_to_selection(
+        sentence_card,
+        reading_selection={
+            "selection_type": "word",
+            "selected_text": "monuments",
+            "sentence_text": "Richard Cox travelled to document these spectacular monuments.",
+        },
+        locale="en",
+    )
+    assert aligned["card_type"] == "vocab_context"
+    assert aligned["note_type"] == "word_coach"
+    target = aligned.get("target") or {}
+    assert (
+        str(target.get("word") or target.get("text") or "")
+        .lower()
+        .startswith("monument")
+    )
+
+
 def test_reading_coach_cache_key_differs_by_level():
     base = dict(
         reading_id="cambridge10-stepwells",

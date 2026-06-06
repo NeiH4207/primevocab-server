@@ -2979,6 +2979,62 @@ def mock_reading_helper_note(*, context: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+_WORD_COACH_NOTE_TYPES = frozenset(
+    {"word_coach", "context_vocab", "quick_vocab", "quick_note"}
+)
+_SENTENCE_COACH_NOTE_TYPES = frozenset({"sentence_coach", "sentence_breakdown"})
+_WORD_COACH_CARD_TYPES = frozenset({"vocab_context"})
+_SENTENCE_COACH_CARD_TYPES = frozenset({"phrase_breakdown"})
+
+
+def reading_coach_card_kind(card: Dict[str, Any]) -> str:
+    """Classify a normalized coach card as word, sentence, or other."""
+    card_type = str(card.get("card_type") or "").strip()
+    note_type = str(card.get("note_type") or "").strip()
+    if (
+        card_type in _SENTENCE_COACH_CARD_TYPES
+        or note_type in _SENTENCE_COACH_NOTE_TYPES
+    ):
+        return "sentence"
+    target_text = str((card.get("target") or {}).get("text") or "").strip()
+    if note_type == "sentence_logic" and len(target_text.split()) > 2:
+        return "sentence"
+    if card_type in _WORD_COACH_CARD_TYPES and (
+        note_type in _WORD_COACH_NOTE_TYPES or not note_type
+    ):
+        return "word"
+    if card_type in _WORD_COACH_CARD_TYPES:
+        return "word"
+    return "other"
+
+
+def align_reading_coach_card_to_selection(
+    card: Dict[str, Any],
+    *,
+    reading_selection: Optional[Dict[str, Any]] = None,
+    locale: str = "en",
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Ensure card type matches word vs sentence selection intent."""
+    sel = reading_selection or {}
+    selection_type = str(sel.get("selection_type") or "word").strip().lower()
+    if selection_type not in ("word", "sentence"):
+        selection_type = "word"
+
+    kind = reading_coach_card_kind(card)
+    if selection_type == "word" and kind == "sentence":
+        ctx = dict(context or {})
+        ctx.setdefault("locale", locale)
+        ctx["reading_selection"] = sel
+        return mock_reading_helper_note(context=ctx)
+    if selection_type == "sentence" and kind == "word":
+        ctx = dict(context or {})
+        ctx.setdefault("locale", locale)
+        ctx["reading_selection"] = sel
+        return mock_reading_helper_note(context=ctx)
+    return card
+
+
 def mock_reading_helper_text(*, context: Dict[str, Any]) -> str:
     locale = str(context.get("locale") or "en").lower()
     vi = locale.startswith("vi")

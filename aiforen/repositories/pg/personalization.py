@@ -215,11 +215,13 @@ class LearningPersonalizationRepo:
         now: datetime,
     ) -> None:
         sr = progress.get("spaced_repetition") or {}
-        last_result = {
-            "last_mcq_result": progress.get("last_mcq_result"),
-            "last_sentence_id": progress.get("last_sentence_id"),
-            "event_at": now.isoformat(),
-        }
+        last_result = _jsonable(
+            {
+                "last_mcq_result": progress.get("last_mcq_result"),
+                "last_sentence_id": progress.get("last_sentence_id"),
+                "event_at": now.isoformat(),
+            }
+        )
         values = {
             "user_id": user_id,
             "word_id": word_id,

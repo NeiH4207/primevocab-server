@@ -28,6 +28,7 @@ from .json_utils import (
     normalize_vocab_quiz_ai_feedback,
     normalize_writing_assessment,
 )
+from .openai_chat import openai_responses_text
 
 
 class OpenAILLMProvider(LLMProvider):
@@ -45,13 +46,13 @@ class OpenAILLMProvider(LLMProvider):
         prompt = build_vocab_calibration_prompt(context=context)
 
         logger.info("Vocab calibration review via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=prompt,
             max_output_tokens=900,
             temperature=0.25,
         )
-        text = (resp.output_text or "").strip()
         return normalize_vocab_calibration_payload(extract_json(text), context=context)
 
     async def explain_reading_phrase(
@@ -68,13 +69,13 @@ class OpenAILLMProvider(LLMProvider):
         prompt = build_reading_explain_prompt(context=context)
 
         logger.info("Coaching reading explain via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=prompt,
             max_output_tokens=500,
             temperature=0.2,
         )
-        text = (resp.output_text or "").strip()
         return normalize_reading_explain_payload(
             extract_json(text),
             phrase=str(context.get("phrase") or ""),
@@ -96,13 +97,13 @@ class OpenAILLMProvider(LLMProvider):
         prompt = build_reading_questions_prompt(context=context)
 
         logger.info("Coaching reading questions via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=prompt,
             max_output_tokens=1300,
             temperature=0.3,
         )
-        text = (resp.output_text or "").strip()
         return normalize_reading_questions_payload(
             extract_json(text),
             count=int(context.get("count") or 4),
@@ -123,13 +124,13 @@ class OpenAILLMProvider(LLMProvider):
         prompt = build_coaching_notes_prompt(context=context)
 
         logger.info("Coaching notes via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=prompt,
             max_output_tokens=700,
             temperature=0.3,
         )
-        text = (resp.output_text or "").strip()
         return normalize_coaching_notes_payload(extract_json(text), context=context)
 
     async def generate_vocab_daily_mission(
@@ -146,13 +147,13 @@ class OpenAILLMProvider(LLMProvider):
         prompt = build_vocab_daily_mission_prompt(context=context)
 
         logger.info("Vocab daily mission via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=prompt,
             max_output_tokens=1100,
             temperature=0.2,
         )
-        text = (resp.output_text or "").strip()
         return normalize_vocab_daily_mission_payload(
             extract_json(text),
             context=context,
@@ -188,13 +189,13 @@ class OpenAILLMProvider(LLMProvider):
         )
 
         logger.info("Vocab AI eval via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=prompt,
             max_output_tokens=900,
             temperature=0.1,
         )
-        text = (resp.output_text or "").strip()
         payload = extract_json(text)
         return normalize_vocab_eval_payload(
             payload,
@@ -236,13 +237,13 @@ class OpenAILLMProvider(LLMProvider):
         )
 
         logger.info("Vocab quiz AI eval via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=eval_prompt,
             max_output_tokens=700,
             temperature=0.1,
         )
-        text = (resp.output_text or "").strip()
         payload = extract_json(text)
         return normalize_vocab_quiz_ai_feedback(
             payload,
@@ -295,13 +296,13 @@ class OpenAILLMProvider(LLMProvider):
         )
 
         logger.info("Writing AI eval via OpenAI model={}", model)
-        resp = await client.responses.create(
+        text = await openai_responses_text(
+            client,
             model=model,
             input=prompt,
             max_output_tokens=1800,
             temperature=0.2,
         )
-        text = (resp.output_text or "").strip()
         assessment = normalize_writing_assessment(extract_json(text))
 
         for step in (

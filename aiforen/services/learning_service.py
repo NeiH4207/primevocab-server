@@ -578,6 +578,7 @@ from aiforen.integrations.llm.factory import get_llm_provider
 from aiforen.integrations.llm.json_utils import (
     normalize_vocab_calibration_payload,
     normalize_vocab_daily_mission_payload,
+    normalize_vocab_quiz_ai_feedback,
 )
 from aiforen.repositories.pg.grammar import GrammarRepo
 from aiforen.repositories.pg.learning_progress import LearningProgressRepo
@@ -642,6 +643,50 @@ def _vocab_quiz_ai_unavailable_feedback(exc: Exception) -> Dict[str, Any]:
 def _quiz_production_needs_ai(question: Any) -> bool:
     interaction = (getattr(question, "interaction_kind", None) or "mcq").strip().lower()
     return interaction in ("free_text", "rewrite")
+
+
+def _normalize_quiz_answer_text(value: str) -> str:
+    text = re.sub(r"\s+", " ", (value or "").strip().lower())
+    return text.rstrip(".,!?;:")
+
+
+def _quiz_reference_answer(payload: Dict[str, Any]) -> str:
+    for key in ("model_answer", "corrected_sentence"):
+        raw = str(payload.get(key) or "").strip()
+        if raw:
+            return raw
+    return ""
+
+
+def _quiz_answers_quick_match(given: str, reference: str) -> bool:
+    ref = _normalize_quiz_answer_text(reference)
+    ans = _normalize_quiz_answer_text(given)
+    if not ref or not ans:
+        return False
+    return ans == ref
+
+
+def _vocab_quiz_exact_match_feedback(
+    *,
+    learner_answer: str,
+    reference_answer: str,
+    task_type: str = "",
+    ai_scoring: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return normalize_vocab_quiz_ai_feedback(
+        {
+            "status": "ok",
+            "passed": True,
+            "uses_target_word": True,
+            "answers_task": True,
+            "corrected_sentence": learner_answer.strip(),
+            "recommendation": "",
+        },
+        learner_answer=learner_answer,
+        model_answer=reference_answer,
+        task_type=task_type,
+        ai_scoring=ai_scoring,
+    )
 
 
 class LearningService:
@@ -746,8 +791,10 @@ class LearningService:
             "free_text_answer": free_text_answer.strip(),
             "grading_method": payload.get("grading_method") or "ai_rubric",
         }
-        model_answer = str(payload.get("model_answer") or "").strip()
+        reference_answer = _quiz_reference_answer(payload)
+        model_answer = reference_answer
         answer_meta["model_answer"] = model_answer
+        answer_meta["reference_answer"] = reference_answer
 
         allowed, upgrade_hint = await self._check_vocab_ai_quota(user_id, plan_code)
         if not allowed:
@@ -765,6 +812,28 @@ class LearningService:
             )
             return False, answer_meta, feedback, False, False, None
 
+        task_type = str(
+            question.type or payload.get("task_type") or "production"
+        ).strip()
+        ai_scoring = payload.get("ai_scoring")
+        if not isinstance(ai_scoring, dict):
+            ai_scoring = None
+
+        if reference_answer and _quiz_answers_quick_match(
+            free_text_answer, reference_answer
+        ):
+            ai_feedback = _vocab_quiz_exact_match_feedback(
+                learner_answer=free_text_answer,
+                reference_answer=reference_answer,
+                task_type=task_type,
+                ai_scoring=ai_scoring,
+            )
+            answer_meta["grading_method"] = "exact_match"
+            answer_meta["ai_exact_match"] = True
+            answer_meta["ai_score"] = ai_feedback.get("score")
+            answer_meta["ai_pass_score"] = ai_feedback.get("pass_score")
+            return True, answer_meta, ai_feedback, False, False, None
+
         target_word = str(
             payload.get("target_word")
             or payload.get("required_word")
@@ -773,15 +842,9 @@ class LearningService:
         ).strip()
         prompt_text = str(question.prompt or "").strip()
         context_text = str(payload.get("context") or "").strip()
-        task_type = str(
-            question.type or payload.get("task_type") or "production"
-        ).strip()
         rubric = payload.get("ai_grading_rubric")
         if not isinstance(rubric, list):
             rubric = []
-        ai_scoring = payload.get("ai_scoring")
-        if not isinstance(ai_scoring, dict):
-            ai_scoring = None
         flexibility = str(
             payload.get("accepted_flexibility")
             or payload.get("answer_flexibility")
@@ -2756,16 +2819,21 @@ class LearningService:
             return given == expected, "", answer_meta
 
         if interaction in ("free_text", "rewrite"):
-            model = str(payload.get("model_answer") or "").strip().lower()
-            given = (free_text_answer or "").strip().lower()
-            answer_meta["free_text_answer"] = given
-            answer_meta["model_answer"] = model
-            if not model:
-                return bool(given), model, answer_meta
-            if given == model:
-                return True, model, answer_meta
-            # Accept answers that contain the model sentence (learner flexibility).
-            return model in given or given in model, model, answer_meta
+            reference = _quiz_reference_answer(payload)
+            given_norm = _normalize_quiz_answer_text(free_text_answer or "")
+            ref_norm = _normalize_quiz_answer_text(reference)
+            answer_meta["free_text_answer"] = (free_text_answer or "").strip()
+            answer_meta["model_answer"] = reference
+            if not ref_norm:
+                return bool(given_norm), reference, answer_meta
+            if _quiz_answers_quick_match(free_text_answer or "", reference):
+                return True, reference, answer_meta
+            # Accept answers that contain the reference sentence (learner flexibility).
+            return (
+                ref_norm in given_norm or given_norm in ref_norm,
+                reference,
+                answer_meta,
+            )
 
         return False, "", answer_meta
 

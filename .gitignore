@@ -197,6 +197,13 @@ debug_*.py
 !tests/vocab_workout_test.py
 !tests/test_vocab_coaching.py
 !tests/test_coaching_content.py
+!tests/test_coaching_reading_v2.py
+!tests/test_json_utils_vocab_quiz.py
+!tests/test_quick_vocab_check.py
+!tests/test_vocab_task_templates.py
+!tests/test_vocab_word_mission.py
+!tests/test_vocab_word_mission_eval.py
+!tests/fixtures/mission_context_sample.json
 
 # Temporary files
 tmp/

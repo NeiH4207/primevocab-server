@@ -1,0 +1,37 @@
+{
+  "mission_date": "2026-05-31",
+  "locale": "vi",
+  "user_profile": {
+    "current_band": 6.0,
+    "target_band": 7.0,
+    "daily_goal": 6,
+    "calibration_completed": true
+  },
+  "stats": {
+    "due_today": 3,
+    "learned_today": 1,
+    "total_progress_words": 120
+  },
+  "mission_signals": {
+    "primary_mission_type": "repair_weakness",
+    "primary_weakness_dimension": "meaning_mcq_wrong"
+  },
+  "weaknesses": [
+    {
+      "dimension": "meaning_mcq_wrong",
+      "label": "Meaning MCQ",
+      "evidence_count": 4,
+      "pack_id": "pack-demo"
+    }
+  ],
+  "recent_actions": [
+    {
+      "word_id": "word-a",
+      "is_correct": false,
+      "pack_id": "pack-demo"
+    }
+  ],
+  "candidate_packs": [{ "pack_id": "pack-demo", "title": "Band 6 Core" }],
+  "learner_rhythm": "consistent",
+  "learner_stage": "growth_3_to_30_days"
+}

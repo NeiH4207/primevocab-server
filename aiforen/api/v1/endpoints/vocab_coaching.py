@@ -422,7 +422,7 @@ async def coaching_lookup(
                 "entries": [],
                 "source": "external",
                 "cambridge_link": f"https://dictionary.cambridge.org/dictionary/english/{cleaned}",
-                "dictionary_link": f"https://www.lexico.com/en/definition/{cleaned}",
+                "dictionary_link": f"https://www.merriam-webster.com/dictionary/{cleaned}",
             }
             await _dictionary_to_cache(redis, cleaned, empty)
             return _ok(empty)

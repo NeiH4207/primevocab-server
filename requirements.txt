@@ -34,4 +34,8 @@ redis>=5.0.0
 # Postgres (async SQLAlchemy)
 sqlalchemy[asyncio]>=2.0.30
 transipy==1.0.6
+
+# Timezone database — slim Docker images (python:3.11-slim) and Windows lack the
+# system IANA tz files, so ZoneInfo("Asia/Ho_Chi_Minh") needs this at runtime.
+tzdata>=2024.1
 uvicorn[standard]==0.34.3

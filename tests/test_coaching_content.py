@@ -7,6 +7,7 @@ from aiforen.domain.coaching_content import (
     normalize_question,
     passage_tokens_from_paragraphs,
     placeholder_reading,
+    should_refresh_reading_snapshot,
     unit_to_reading_payload,
 )
 
@@ -158,3 +159,57 @@ def test_passage_tokens_from_catalog_paragraphs():
     assert "crowded" in tokens
     assert "relax" in tokens
     assert len(tokens) == len(set(tokens))
+
+
+def _catalog_unit(**overrides):
+    base = {
+        "id": "b2-day01-city-trees-urban-heat",
+        "content_version": 3,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_should_refresh_when_catalog_unit_id_changes():
+    reading = {
+        "content_unit_id": "b2-day01-urban-heat",
+        "content_version": 5,
+        "placeholder": False,
+    }
+    unit = _catalog_unit()
+    assert (
+        should_refresh_reading_snapshot(
+            reading, unit, reading_answers={}, reading_status="pending"
+        )
+        is True
+    )
+
+
+def test_should_not_refresh_when_snapshot_matches_catalog():
+    reading = {
+        "content_unit_id": "b2-day01-city-trees-urban-heat",
+        "content_version": 3,
+        "placeholder": False,
+    }
+    unit = _catalog_unit()
+    assert (
+        should_refresh_reading_snapshot(
+            reading, unit, reading_answers={}, reading_status="pending"
+        )
+        is False
+    )
+
+
+def test_should_not_refresh_completed_day_even_if_catalog_changed():
+    reading = {
+        "content_unit_id": "b2-day01-urban-heat",
+        "content_version": 1,
+        "placeholder": False,
+    }
+    unit = _catalog_unit()
+    assert (
+        should_refresh_reading_snapshot(
+            reading, unit, reading_answers={}, reading_status="completed"
+        )
+        is False
+    )

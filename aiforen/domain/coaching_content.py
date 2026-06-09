@@ -164,12 +164,21 @@ def should_refresh_reading_snapshot(
     reading_answers: Dict[str, Any],
     reading_status: Optional[str],
 ) -> bool:
+    """Return True when the per-user snapshot should be rebuilt from the catalog."""
     if not reading or reading.get("placeholder"):
         return True
-    if int(reading.get("content_version") or 0) >= int(unit.content_version or 0):
+    if reading_status == "completed":
         return False
     if reading_answers:
         return False
-    if reading_status == "completed":
-        return False
-    return True
+
+    snapshot_unit = str(reading.get("content_unit_id") or reading.get("id") or "")
+    catalog_unit = str(unit.id or "")
+    snapshot_version = int(reading.get("content_version") or 0)
+    catalog_version = int(unit.content_version or 0)
+
+    if snapshot_unit != catalog_unit:
+        return True
+    if snapshot_version != catalog_version:
+        return True
+    return False

@@ -1670,6 +1670,7 @@ class VocabCoachingService:
                 )
                 nxt.status = "ready"
                 nxt.analysis = {**(nxt.analysis or {}), "preview": personalized}
+                await self._ensure_day_content(plan, nxt)
                 next_preview = personalized
         await self.s.flush()
 

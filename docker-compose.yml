@@ -76,7 +76,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment: *app_env
+    environment:
+      <<: *app_env
+      VOCAB_STORAGE_DIR: /vocab_storage
     ports:
       - "8000:8000"
     command:
@@ -91,6 +93,7 @@ services:
     volumes:
       - ./aiforen:/app/aiforen:ro
       - ./main.py:/app/main.py:ro
+      - ../vocab_storage:/vocab_storage:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
       interval: 5s

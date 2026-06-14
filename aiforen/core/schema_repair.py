@@ -338,7 +338,7 @@ async def _repair_vocab_coaching(conn) -> None:
                   source VARCHAR(16) NOT NULL DEFAULT 'api',
                   start_date DATE NOT NULL,
                   current_day INTEGER NOT NULL DEFAULT 1,
-                  total_days INTEGER NOT NULL DEFAULT 31,
+                  total_days INTEGER NOT NULL DEFAULT 30,
                   meta JSONB NOT NULL DEFAULT '{}'::jsonb,
                   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

@@ -60,7 +60,8 @@ from aiforen.repositories.pg.vocab_coaching import VocabCoachingRepo
 from aiforen.repositories.pg.vocab_lexicon import VocabLexiconRepo
 
 CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
-TOTAL_DAYS = 31
+TOTAL_DAYS = 30
+COACHING_C2_RELEASE_DAYS = 30
 
 _IELTS_BAND = {
     "A1": 3.5,
@@ -253,6 +254,10 @@ class VocabCoachingService:
         cefr = str(profile.get("calibration_cefr_level") or "B1").upper()
         if cefr not in CEFR_LEVELS:
             cefr = "B1"
+        if cefr == "C2":
+            published = await self.content_repo.count_published_units("C2")
+            if published < COACHING_C2_RELEASE_DAYS:
+                cefr = "C1"
         insight = profile.get("calibration_insight") or {}
         confidence = _confidence_pct(insight.get("confidence"))
         band = profile.get("current_band")

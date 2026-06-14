@@ -113,7 +113,7 @@ def test_confidence_pct_normalizes_fraction_and_percent():
 
 
 def test_total_days_and_levels():
-    assert TOTAL_DAYS == 31
+    assert TOTAL_DAYS == 30
     assert READING_DAY_COUNT == 12
     assert len(get_reading_seed(12)["paragraphs"]) >= 5
     assert CEFR_LEVELS[:2] == ["A1", "A2"]

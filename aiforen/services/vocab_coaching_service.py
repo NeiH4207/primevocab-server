@@ -170,6 +170,13 @@ def _merged_catalog_titles(
     return merged
 
 
+def _c2_coaching_released(published_db_count: int) -> bool:
+    """C2 unlocks when the full 30-day catalog is authored, not only when prod DB is seeded."""
+    if published_db_count >= COACHING_C2_RELEASE_DAYS:
+        return True
+    return len(static_reading_titles("C2")) >= COACHING_C2_RELEASE_DAYS
+
+
 def _resolve_day_reading_title(
     cefr_level: str,
     day_number: int,
@@ -307,7 +314,7 @@ class VocabCoachingService:
             cefr = "B1"
         if cefr == "C2":
             published = await self.content_repo.count_published_units("C2")
-            if published < COACHING_C2_RELEASE_DAYS:
+            if not _c2_coaching_released(published):
                 cefr = "C1"
         insight = profile.get("calibration_insight") or {}
         confidence = _confidence_pct(insight.get("confidence"))
@@ -2052,7 +2059,7 @@ class VocabCoachingService:
             raise ValueError("Invalid CEFR level")
         if cefr == "C2":
             published = await self.content_repo.count_published_units("C2")
-            if published < COACHING_C2_RELEASE_DAYS:
+            if not _c2_coaching_released(published):
                 cefr = "C1"
         stats = await self.stats.set_vocab_coaching_level(
             user_id, cefr_level=cefr, source="manual"

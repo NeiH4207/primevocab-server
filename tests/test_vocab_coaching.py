@@ -2,6 +2,7 @@
 
 import asyncio
 
+from aiforen.domain.coaching_reading_titles import static_reading_titles
 from aiforen.domain.reading_coach_cache import (
     READING_COACH_PROMPT_VERSION,
     build_reading_coach_cache_key,
@@ -31,6 +32,7 @@ from aiforen.services.vocab_coaching_service import (
     CEFR_LEVELS,
     TOTAL_DAYS,
     VocabCoachingService,
+    _c2_coaching_released,
     _cefr_offset,
     _coaching_word_meets_plan_level,
     _confidence_pct,
@@ -92,6 +94,13 @@ def test_reading_vocab_candidates_stale_detects_a1_for_b2():
     fresh = [{"word": "shade", "cefr": "C1", "quiz_steps": [{}]}]
     assert _reading_vocab_candidates_stale(stale, "B2") is True
     assert _reading_vocab_candidates_stale(fresh, "B2") is False
+
+
+def test_c2_coaching_released_when_static_catalog_complete():
+    assert len(static_reading_titles("C2")) >= 30
+    assert _c2_coaching_released(0) is True
+    assert _c2_coaching_released(29) is True
+    assert _c2_coaching_released(30) is True
 
 
 def test_cefr_offset_clamps():

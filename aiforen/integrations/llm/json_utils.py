@@ -9,81 +9,70 @@ from typing import Any, Dict, List, Optional
 from aiforen.domain.vocab_mission_priority import reorder_plan_blocks
 
 
-def extract_json(raw: str) -> Dict[str, Any]:
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
+def _strip_markdown_fences(raw: str) -> str:
+    s = raw.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    return s.strip()
 
-    match = re.search(r"\{[\s\S]*\}", raw)
-    if not match:
-        raise ValueError("LLM response did not contain JSON")
-    obj = json.loads(match.group(0))
+
+def _repair_json_text(text: str) -> str:
+    """Remove trailing commas before closing braces/brackets."""
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def _extract_balanced_json_object(raw: str) -> Optional[str]:
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start : i + 1]
+    return None
+
+
+def _parse_json_object(text: str) -> Dict[str, Any]:
+    obj = json.loads(text)
     if not isinstance(obj, dict):
         raise ValueError("LLM JSON payload is not an object")
     return obj
 
 
-def build_vocab_eval_prompt(
-    *,
-    word: str,
-    translate_prompt: str,
-    topic_prompt: str,
-    translate_sentence: str,
-    topic_sentence: str,
-    current_band: float,
-    target_band: float,
-    weakness_context: Optional[list[str]] = None,
-) -> str:
-    weakness_block = ""
-    if weakness_context:
-        weakness_block = (
-            f"\nKnown learner weakness patterns: {', '.join(weakness_context)}\n"
-            "Pay extra attention to these patterns when evaluating.\n"
-        )
-    topic_block = ""
-    if topic_sentence.strip():
-        topic_block = (
-            f'TOPIC task:\nTopic prompt: "{topic_prompt}"\n'
-            f'Learner sentence: "{topic_sentence}"\n'
-        )
-    else:
-        topic_block = "TOPIC task: not provided — omit topic evaluation; set topic fields to skipped in logic.\n"
-    return (
-        "You are an IELTS vocabulary coach for Vietnamese learners.\n"
-        f"Target level: Band {current_band} → {target_band}\n"
-        f'Target word: "{word}"\n\n'
-        "Evaluate the learner's English sentence(s).\n\n"
-        f'TRANSLATE task:\nVietnamese prompt: "{translate_prompt}"\n'
-        f'Learner sentence: "{translate_sentence or ""}"\n\n'
-        f"{topic_block}\n"
-        "Language: Vietnamese-first learners; keep feedback direct and coach-like. "
-        "No generic praise. No report-card tone.\n"
-        f"{weakness_block}\n"
-        "EVALUATION RULES\n"
-        'For each provided sentence, status must be "pass", "needs_fix", or "fail".\n'
-        "- pass: grammatically correct and target word used correctly in context\n"
-        "- needs_fix: minor grammar/word form/collocation issue; target word present and mostly correct\n"
-        "- fail: wrong meaning, Vietnamese text, target word absent, or seriously misused\n\n"
-        "CORRECTED SENTENCE: minimal edit only; if pass, return learner sentence unchanged.\n"
-        "RECOMMENDATION: max 2 sentences; quote the exact phrase; be specific. "
-        "Pattern: Your phrase 'X' is [issue]. Try 'Y' because [reason].\n"
-        f'BAND_STYLE_TIP: one concrete Band {target_band} tip referencing "{word}"; '
-        "empty only if all sentences fail.\n\n"
-        "Return ONLY strict JSON:\n"
-        "{\n"
-        '  "translate": {"status":"pass|needs_fix|fail","is_grammatically_ok":true,'
-        '"answers_prompt":true,"uses_target_word":true,"corrected_sentence":"...",'
-        '"recommendation":"..."},\n'
-        '  "topic": {"status":"pass|needs_fix|fail","is_grammatically_ok":true,'
-        '"answers_prompt":true,"uses_target_word":true,"corrected_sentence":"...",'
-        '"recommendation":"..."},\n'
-        '  "band_style_tip": "...",\n'
-        '  "step3_passed": true\n'
-        "}\n"
-    )
+def extract_json(raw: str) -> Dict[str, Any]:
+    trimmed = _strip_markdown_fences(raw)
+    candidates = [trimmed]
+    balanced = _extract_balanced_json_object(trimmed)
+    if balanced and balanced != trimmed:
+        candidates.append(balanced)
+
+    last_exc: Optional[Exception] = None
+    for candidate in candidates:
+        for attempt in (candidate, _repair_json_text(candidate)):
+            try:
+                return _parse_json_object(attempt)
+            except Exception as exc:
+                last_exc = exc
+
+    raise ValueError("LLM response did not contain JSON") from last_exc
 
 
 _GENERIC_RECOMMENDATION_MARKERS = (
@@ -225,79 +214,6 @@ def _synthesize_vocab_quiz_score_fallback(
     )
     recommendation = "Rà lại nghĩa đề, từ mục tiêu, ngữ pháp và cách diễn đạt tự nhiên."
     return explanation, recommendation
-
-
-def _norm_eval_entry(node: Dict[str, Any], fallback_sentence: str) -> Dict[str, Any]:
-    node = node or {}
-    raw_status = str(node.get("status", "")).lower().strip()
-    if raw_status == "pass":
-        raw_status = "ok"
-    if raw_status not in ("ok", "needs_fix", "fail"):
-        # Back-compat with older is_grammatically_ok-only payloads
-        raw_status = "ok" if node.get("is_grammatically_ok") else "needs_fix"
-    answers_prompt = bool(node.get("answers_prompt", raw_status != "fail"))
-    uses_target_word = bool(node.get("uses_target_word", raw_status != "fail"))
-    if not answers_prompt or not uses_target_word:
-        raw_status = "fail"
-    corrected = _clamp_corrected_sentence(
-        str(node.get("corrected_sentence", fallback_sentence)),
-        fallback_sentence,
-    )
-    recommendation = _sanitize_recommendation(str(node.get("recommendation", "")))
-    return {
-        "status": raw_status,
-        "is_grammatically_ok": raw_status == "ok",
-        "answers_prompt": answers_prompt,
-        "uses_target_word": uses_target_word,
-        "corrected_sentence": corrected,
-        "recommendation": recommendation,
-    }
-
-
-def step3_passed_from_feedback(ai_feedback: Optional[Dict[str, Any]]) -> bool:
-    if not ai_feedback or ai_feedback.get("ai_status") in (
-        "unavailable",
-        "invalid_language",
-    ):
-        return False
-    if "step3_passed" in ai_feedback:
-        return bool(ai_feedback.get("step3_passed"))
-    translate = ai_feedback.get("translate") or {}
-    topic = ai_feedback.get("topic") or {}
-    if topic.get("status") == "skipped":
-        return translate.get("status") == "ok"
-    return translate.get("status") == "ok" and topic.get("status") == "ok"
-
-
-def normalize_vocab_eval_payload(
-    payload: Dict[str, Any],
-    *,
-    translate_sentence: str,
-    topic_sentence: str,
-) -> Dict[str, Any]:
-    translate = _norm_eval_entry(payload.get("translate") or {}, translate_sentence)
-    topic = _norm_eval_entry(payload.get("topic") or {}, topic_sentence)
-    if not topic_sentence.strip():
-        topic = {
-            "status": "skipped",
-            "is_grammatically_ok": True,
-            "answers_prompt": True,
-            "uses_target_word": True,
-            "corrected_sentence": "",
-            "recommendation": "",
-        }
-    step3_passed = bool(payload.get("step3_passed"))
-    if not step3_passed:
-        if topic.get("status") == "skipped":
-            step3_passed = translate["status"] == "ok"
-        else:
-            step3_passed = translate["status"] == "ok" and topic["status"] == "ok"
-    return {
-        "translate": translate,
-        "topic": topic,
-        "band_style_tip": str(payload.get("band_style_tip", "")),
-        "step3_passed": step3_passed,
-    }
 
 
 def build_vocab_quiz_eval_prompt(

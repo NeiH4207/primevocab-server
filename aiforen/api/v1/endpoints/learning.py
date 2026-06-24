@@ -81,7 +81,7 @@ def _normalize_dictionary(payload: List[Dict[str, Any]], word: str) -> Dict[str,
         "word": word,
         "entries": entries,
         "cambridge_link": f"https://dictionary.cambridge.org/dictionary/english/{word}",
-        "dictionary_link": f"https://www.lexico.com/en/definition/{word}",
+        "dictionary_link": f"https://www.merriam-webster.com/dictionary/{word}",
     }
 
 
@@ -123,7 +123,7 @@ async def lookup_dictionary(word: str, redis=Depends(get_redis)):
                 "word": cleaned,
                 "entries": [],
                 "cambridge_link": f"https://dictionary.cambridge.org/dictionary/english/{cleaned}",
-                "dictionary_link": f"https://www.lexico.com/en/definition/{cleaned}",
+                "dictionary_link": f"https://www.merriam-webster.com/dictionary/{cleaned}",
             }
             await _dictionary_to_cache(redis, cleaned, empty)
             return {"success": True, "data": empty, "cached": False}

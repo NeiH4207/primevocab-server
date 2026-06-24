@@ -488,7 +488,6 @@ def detect_suspicious_self_rating(
         suspicion += 1
         flags.append("Many hard words were marked Know/Use very quickly.")
 
-    (bands[1]["counts"]["Use"] / bands[1]["total"]) if bands[1]["total"] else 0
     use_c1 = (bands[3]["counts"]["Use"] / bands[3]["total"]) if bands[3]["total"] else 0
     use_c2 = (bands[4]["counts"]["Use"] / bands[4]["total"]) if bands[4]["total"] else 0
     if use_c1 + use_c2 > 0.8 and score_by_level.get("B1", 0) < 60:

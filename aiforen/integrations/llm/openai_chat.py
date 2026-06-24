@@ -73,6 +73,48 @@ async def openai_chat_completion_text(
     return ""
 
 
+async def openai_responses_text(
+    client: Any,
+    *,
+    model: str,
+    input: str,
+    max_output_tokens: int = 700,
+    temperature: Optional[float] = 0.2,
+) -> str:
+    """Return Responses API text; retries without temperature when unsupported."""
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": input,
+        "max_output_tokens": max_output_tokens,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    last_exc: Optional[Exception] = None
+    temperature_attempts: List[Optional[float]] = [temperature]
+    if temperature is not None:
+        temperature_attempts.append(None)
+
+    for temp in temperature_attempts:
+        call_kwargs = dict(kwargs)
+        if temp is None:
+            call_kwargs.pop("temperature", None)
+        else:
+            call_kwargs["temperature"] = temp
+        try:
+            resp = await client.responses.create(**call_kwargs)
+            return (resp.output_text or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if temp is not None and _should_retry_temperature(exc):
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+    return ""
+
+
 async def openai_chat_completion_stream(
     client: Any,
     *,

@@ -1,4 +1,4 @@
-"""Vocab Coaching endpoints — 31-day adaptive plan, reading, DB-first lookup, AI."""
+"""Vocab Coaching endpoints — 30-day adaptive plan, reading, DB-first lookup, AI."""
 
 from __future__ import annotations
 
@@ -385,6 +385,29 @@ async def coaching_complete(
         raise _guard(exc)
 
 
+class CoachingChangeLevelIn(BaseModel):
+    cefr_level: str = Field(..., min_length=2, max_length=2)
+
+
+@router.post("/change-level")
+async def coaching_change_level(
+    body: CoachingChangeLevelIn,
+    locale: str = Query("en", min_length=2, max_length=8),
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _ok(
+            await _svc(pg).change_level(
+                user_id=user.id,
+                cefr_level=body.cefr_level,
+                locale=locale,
+            )
+        )
+    except ValueError as exc:
+        raise _guard(exc)
+
+
 @router.post("/reset")
 async def coaching_reset(
     user: CurrentUser = Depends(get_current_user),
@@ -422,7 +445,7 @@ async def coaching_lookup(
                 "entries": [],
                 "source": "external",
                 "cambridge_link": f"https://dictionary.cambridge.org/dictionary/english/{cleaned}",
-                "dictionary_link": f"https://www.lexico.com/en/definition/{cleaned}",
+                "dictionary_link": f"https://www.merriam-webster.com/dictionary/{cleaned}",
             }
             await _dictionary_to_cache(redis, cleaned, empty)
             return _ok(empty)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -15,6 +15,28 @@ from aiforen.domain.sql_models import CoachingReadingUnit, CoachingReadingUnitQu
 class CoachingContentRepo:
     def __init__(self, session: AsyncSession):
         self.s = session
+
+    async def count_published_units(self, cefr_level: str) -> int:
+        level = (cefr_level or "").upper()
+        row = await self.s.execute(
+            select(func.count())
+            .select_from(CoachingReadingUnit)
+            .where(
+                CoachingReadingUnit.cefr_level == level,
+                CoachingReadingUnit.status == "published",
+            )
+        )
+        return int(row.scalar_one() or 0)
+
+    async def list_published_unit_titles(self, cefr_level: str) -> Dict[int, str]:
+        level = (cefr_level or "").upper()
+        rows = await self.s.execute(
+            select(CoachingReadingUnit.day_number, CoachingReadingUnit.title).where(
+                CoachingReadingUnit.cefr_level == level,
+                CoachingReadingUnit.status == "published",
+            )
+        )
+        return {int(day_number): str(title) for day_number, title in rows.all()}
 
     async def get_published_unit(
         self, cefr_level: str, day_number: int

@@ -1,4 +1,4 @@
-"""Adaptive 31-day vocab coaching orchestration.
+"""Adaptive 30-day vocab coaching orchestration.
 
 Quick check runs once (persisted CEFR estimate). After that the learner gets the
 three daily sessions (memory recall, reading challenge, coaching notes). The
@@ -60,7 +60,8 @@ from aiforen.repositories.pg.vocab_coaching import VocabCoachingRepo
 from aiforen.repositories.pg.vocab_lexicon import VocabLexiconRepo
 
 CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
-TOTAL_DAYS = 31
+TOTAL_DAYS = 30
+COACHING_C2_RELEASE_DAYS = 30
 
 _IELTS_BAND = {
     "A1": 3.5,
@@ -142,6 +143,37 @@ def _ielts_band(level: str) -> float:
 
 def _ielts_range(level: str) -> str:
     return _IELTS_RANGE.get((level or "B1").upper(), "IELTS vocabulary ~5.0–5.5")
+
+
+_LEGACY_GENERIC_DAY_TITLE_MARKERS = (
+    "Establish your vocabulary rhythm",
+    "Adaptive focus",
+)
+
+
+def _is_legacy_generic_day_title(title: Optional[str]) -> bool:
+    text = (title or "").strip()
+    if not text:
+        return True
+    return any(marker in text for marker in _LEGACY_GENERIC_DAY_TITLE_MARKERS)
+
+
+def _resolve_day_reading_title(
+    cefr_level: str,
+    day_number: int,
+    *,
+    catalog_titles: Dict[int, str],
+    reading: Optional[Dict[str, Any]] = None,
+) -> str:
+    reading_title = str((reading or {}).get("title") or "").strip()
+    if reading_title and reading_title != "Reading content coming soon":
+        return reading_title
+    catalog_title = catalog_titles.get(day_number)
+    if catalog_title:
+        return catalog_title.strip()
+    return (
+        placeholder_reading(cefr_level, day_number).get("title") or f"Day {day_number}"
+    )
 
 
 def _coaching_word_key(item: Dict[str, Any]) -> str:
@@ -253,6 +285,10 @@ class VocabCoachingService:
         cefr = str(profile.get("calibration_cefr_level") or "B1").upper()
         if cefr not in CEFR_LEVELS:
             cefr = "B1"
+        if cefr == "C2":
+            published = await self.content_repo.count_published_units("C2")
+            if published < COACHING_C2_RELEASE_DAYS:
+                cefr = "C1"
         insight = profile.get("calibration_insight") or {}
         confidence = _confidence_pct(insight.get("confidence"))
         band = profile.get("current_band")
@@ -267,7 +303,7 @@ class VocabCoachingService:
             cefr_level=cefr,
             estimated_band=band,
             confidence=confidence,
-            source="calibration",
+            source=str(profile.get("level_source") or "calibration"),
             start_date=datetime.now(VN_TZ).date(),
             total_days=TOTAL_DAYS,
             meta={
@@ -275,16 +311,17 @@ class VocabCoachingService:
                 "mix": {"current": 10, "lower": 2, "stretch": 3},
             },
         )
+        catalog_titles = await self.content_repo.list_published_unit_titles(cefr)
         day_rows = []
         for number in range(1, TOTAL_DAYS + 1):
             day_rows.append(
                 {
                     "day_number": number,
                     "status": "ready" if number == 1 else "locked",
-                    "title": (
-                        "Day 1 · Establish your vocabulary rhythm"
-                        if number == 1
-                        else f"Day {number} · Adaptive focus"
+                    "title": _resolve_day_reading_title(
+                        cefr,
+                        number,
+                        catalog_titles=catalog_titles,
                     ),
                     "focus_skill": "foundation" if number == 1 else "adaptive",
                     "analysis": (
@@ -298,7 +335,46 @@ class VocabCoachingService:
         day_one = await self.repo.get_day(plan_id=plan.id, day_number=1)
         if day_one is not None:
             await self._ensure_day_content(plan, day_one)
+        for number in range(2, TOTAL_DAYS + 1):
+            day = await self.repo.get_day(plan_id=plan.id, day_number=number)
+            if day is not None:
+                await self._sync_day_title(plan, day, catalog_titles=catalog_titles)
         return plan
+
+    async def _sync_day_title(
+        self,
+        plan: VocabCoachingPlan,
+        day: VocabCoachingDay,
+        *,
+        catalog_titles: Optional[Dict[int, str]] = None,
+    ) -> bool:
+        titles = catalog_titles
+        if titles is None:
+            titles = await self.content_repo.list_published_unit_titles(plan.cefr_level)
+        resolved = _resolve_day_reading_title(
+            plan.cefr_level,
+            day.day_number,
+            catalog_titles=titles,
+            reading=day.reading if isinstance(day.reading, dict) else None,
+        )
+        if day.title == resolved:
+            return False
+        if _is_legacy_generic_day_title(day.title) or not (day.reading or {}).get(
+            "title"
+        ):
+            day.title = resolved
+            await self.s.flush()
+            return True
+        return False
+
+    async def _sync_plan_day_titles(
+        self, plan: VocabCoachingPlan, days: Sequence[VocabCoachingDay]
+    ) -> None:
+        catalog_titles = await self.content_repo.list_published_unit_titles(
+            plan.cefr_level
+        )
+        for day in days:
+            await self._sync_day_title(plan, day, catalog_titles=catalog_titles)
 
     def _locked_preview(self, number: int, cefr: str) -> str:
         return (
@@ -310,14 +386,25 @@ class VocabCoachingService:
 
     async def _plan_view(self, plan: VocabCoachingPlan) -> Dict[str, Any]:
         days = await self.repo.list_days(plan.id)
+        await self._sync_plan_day_titles(plan, days)
+        catalog_titles = await self.content_repo.list_published_unit_titles(
+            plan.cefr_level
+        )
         timeline = []
         for day in days:
             unlocked = day.day_number <= plan.current_day
+            display_title = _resolve_day_reading_title(
+                plan.cefr_level,
+                day.day_number,
+                catalog_titles=catalog_titles,
+                reading=day.reading if isinstance(day.reading, dict) else None,
+            )
             timeline.append(
                 {
                     "day_number": day.day_number,
                     "status": day.status,
-                    "title": day.title,
+                    "title": display_title,
+                    "reading_title": display_title,
                     "focus_skill": day.focus_skill,
                     "unlocked": unlocked,
                     "is_today": day.day_number == plan.current_day,
@@ -422,6 +509,11 @@ class VocabCoachingService:
 
         if mutated:
             day.reading = reading
+
+        reading_title = str((reading or {}).get("title") or "").strip()
+        if reading_title and day.title != reading_title:
+            day.title = reading_title
+            mutated = True
 
         if not day.sessions:
             day.sessions = {
@@ -742,10 +834,21 @@ class VocabCoachingService:
             raise ValueError("Day not found")
 
         if day_number > plan.current_day:
+            catalog_titles = await self.content_repo.list_published_unit_titles(
+                plan.cefr_level
+            )
+            display_title = _resolve_day_reading_title(
+                plan.cefr_level,
+                day_number,
+                catalog_titles=catalog_titles,
+                reading=day.reading if isinstance(day.reading, dict) else None,
+            )
+            await self._sync_day_title(plan, day, catalog_titles=catalog_titles)
             return {
                 "locked": True,
                 "day_number": day_number,
                 "status": "locked",
+                "title": display_title,
                 "preview": (day.analysis or {}).get("preview")
                 or self._locked_preview(day_number, plan.cefr_level),
             }
@@ -1670,6 +1773,7 @@ class VocabCoachingService:
                 )
                 nxt.status = "ready"
                 nxt.analysis = {**(nxt.analysis or {}), "preview": personalized}
+                await self._ensure_day_content(plan, nxt)
                 next_preview = personalized
         await self.s.flush()
 
@@ -1882,6 +1986,25 @@ class VocabCoachingService:
         archived = await self.repo.archive_active_plans(user_id)
         await self.stats.clear_vocab_calibration(user_id)
         return {"reset": True, "archived_plans": archived}
+
+    async def change_level(
+        self, *, user_id: str, cefr_level: str, locale: str = "en"
+    ) -> Dict[str, Any]:
+        """Switch coaching CEFR and rebuild the 30-day plan (progress resets)."""
+        _ = locale
+        cefr = str(cefr_level or "").strip().upper()
+        if cefr not in CEFR_LEVELS:
+            raise ValueError("Invalid CEFR level")
+        if cefr == "C2":
+            published = await self.content_repo.count_published_units("C2")
+            if published < COACHING_C2_RELEASE_DAYS:
+                cefr = "C1"
+        stats = await self.stats.set_vocab_coaching_level(
+            user_id, cefr_level=cefr, source="manual"
+        )
+        profile = stats.get("vocab_profile") or {}
+        plan = await self._create_plan_from_calibration(user_id, profile)
+        return await self._plan_view(plan)
 
     def _recent_actions_for_helper(
         self, recent_actions: Sequence[Dict[str, Any]]

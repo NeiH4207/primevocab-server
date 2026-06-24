@@ -451,7 +451,7 @@ class VocabCoachingRepo:
             "cefr_level": cefr,
             "ielts_band": band,
             "cambridge_link": f"https://dictionary.cambridge.org/dictionary/english/{cleaned}",
-            "dictionary_link": f"https://www.lexico.com/en/definition/{cleaned}",
+            "dictionary_link": f"https://www.merriam-webster.com/dictionary/{cleaned}",
         }
 
     # -------------------------------------------------------- reading coach cache

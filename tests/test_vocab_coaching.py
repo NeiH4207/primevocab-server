@@ -114,6 +114,33 @@ def test_confidence_pct_normalizes_fraction_and_percent():
     assert _confidence_pct(150) == 100.0
 
 
+def test_manual_level_confidence_decay():
+    from aiforen.repositories.pg.user_stats import (
+        DEFAULT_LEVEL_CONFIDENCE,
+        MANUAL_LEVEL_BASE_CONFIDENCE,
+        MANUAL_MIN_CONFIDENCE,
+        MANUAL_SWITCH_CONFIDENCE_DECAY,
+        _confidence_for_level_change,
+    )
+
+    assert _confidence_for_level_change({}, cefr_level="B1", source="default") == (
+        DEFAULT_LEVEL_CONFIDENCE
+    )
+    assert _confidence_for_level_change({}, cefr_level="B2", source="manual") == (
+        MANUAL_LEVEL_BASE_CONFIDENCE
+    )
+    profile = {
+        "calibration_cefr_level": "B1",
+        "calibration_insight": {"confidence": DEFAULT_LEVEL_CONFIDENCE / 100},
+    }
+    switched = _confidence_for_level_change(profile, cefr_level="B2", source="manual")
+    assert switched == DEFAULT_LEVEL_CONFIDENCE - MANUAL_SWITCH_CONFIDENCE_DECAY
+    profile["calibration_insight"] = {"confidence": 0.25}
+    assert _confidence_for_level_change(profile, cefr_level="C1", source="manual") == (
+        MANUAL_MIN_CONFIDENCE
+    )
+
+
 def test_total_days_and_levels():
     assert TOTAL_DAYS == 30
     assert READING_DAY_COUNT == 12

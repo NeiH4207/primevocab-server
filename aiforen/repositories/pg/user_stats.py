@@ -28,6 +28,48 @@ _CEFR_DEFAULT_BAND: Dict[str, float] = {
     "C2": 8.5,
 }
 
+# Self-selected coaching level confidence (quick check keeps LLM/rule confidence).
+# - Default bootstrap (B1, no user choice): 40%
+# - First manual pick: 45%
+# - Each manual level switch: −12 pp from current, floor 20%
+DEFAULT_LEVEL_CONFIDENCE = 40.0
+MANUAL_LEVEL_BASE_CONFIDENCE = 45.0
+MANUAL_SWITCH_CONFIDENCE_DECAY = 12.0
+MANUAL_MIN_CONFIDENCE = 20.0
+
+
+def _normalize_confidence_pct(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num <= 1:
+        num *= 100
+    return max(0.0, min(100.0, num))
+
+
+def _confidence_for_level_change(
+    profile: Dict[str, Any],
+    *,
+    cefr_level: str,
+    source: str,
+) -> float:
+    insight = profile.get("calibration_insight") or {}
+    prev_level = str(profile.get("calibration_cefr_level") or "").upper()
+    prev_pct = _normalize_confidence_pct(insight.get("confidence"))
+
+    if source == "default":
+        return DEFAULT_LEVEL_CONFIDENCE
+    if source != "manual":
+        return prev_pct if prev_pct is not None else MANUAL_LEVEL_BASE_CONFIDENCE
+
+    if prev_level and prev_level != cefr_level.upper():
+        base = prev_pct if prev_pct is not None else MANUAL_LEVEL_BASE_CONFIDENCE
+        return max(MANUAL_MIN_CONFIDENCE, base - MANUAL_SWITCH_CONFIDENCE_DECAY)
+    return MANUAL_LEVEL_BASE_CONFIDENCE
+
 
 def _uuid(value: str | uuid.UUID) -> uuid.UUID:
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
@@ -150,6 +192,7 @@ class UserStatsRepo:
         profile = dict(existing.get("vocab_profile") or {})
         profile["calibration_completed"] = True
         profile["calibration_completed_at"] = datetime.utcnow().isoformat()
+        profile["level_source"] = "calibration"
         if cefr_level:
             profile["calibration_cefr_level"] = cefr_level
         if calibration_insight:
@@ -194,6 +237,13 @@ class UserStatsRepo:
         profile["level_changed_at"] = datetime.utcnow().isoformat()
         if not profile.get("calibration_completed_at"):
             profile["calibration_completed_at"] = profile["level_changed_at"]
+        confidence_pct = _confidence_for_level_change(
+            profile, cefr_level=cefr_level, source=source
+        )
+        insight = dict(profile.get("calibration_insight") or {})
+        insight["confidence"] = confidence_pct / 100.0
+        insight["source"] = source
+        profile["calibration_insight"] = insight
         band = float(_CEFR_DEFAULT_BAND.get(cefr_level.upper(), 5.5))
         profile["current_band"] = band
         await self._update(

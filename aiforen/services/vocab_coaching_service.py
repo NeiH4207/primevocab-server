@@ -275,24 +275,27 @@ class VocabCoachingService:
         self.lexicon = VocabLexiconRepo(session)
 
     # ============================================================ plan / view
+    async def _ensure_coaching_profile(self, user_id: str) -> Dict[str, Any]:
+        """Bootstrap B1 default when the learner has no level yet (quick check optional)."""
+        stats = await self.stats.get_or_default(user_id)
+        profile = stats.get("vocab_profile") or {}
+        if not profile.get("calibration_completed"):
+            stats = await self.stats.set_vocab_coaching_level(
+                user_id, cefr_level="B1", source="default"
+            )
+            profile = stats.get("vocab_profile") or {}
+        return profile
+
     async def get_plan(self, *, user_id: str, locale: str = "en") -> Dict[str, Any]:
         plan = await self.repo.get_active_plan(user_id)
         if plan is None:
-            stats = await self.stats.get_or_default(user_id)
-            profile = stats.get("vocab_profile") or {}
-            if not profile.get("calibration_completed"):
-                return {"needs_quick_check": True, "plan": None, "timeline": []}
+            profile = await self._ensure_coaching_profile(user_id)
             plan = await self._create_plan_from_calibration(user_id, profile)
         return await self._plan_view(plan)
 
     async def create_plan(self, *, user_id: str, locale: str = "en") -> Dict[str, Any]:
-        plan = await self.repo.get_active_plan(user_id)
-        if plan is not None:
-            return await self._plan_view(plan)
-        stats = await self.stats.get_or_default(user_id)
-        profile = stats.get("vocab_profile") or {}
-        if not profile.get("calibration_completed"):
-            return {"needs_quick_check": True, "plan": None, "timeline": []}
+        """Rebuild the active plan from the latest profile (e.g. after quick check)."""
+        profile = await self._ensure_coaching_profile(user_id)
         plan = await self._create_plan_from_calibration(user_id, profile)
         return await self._plan_view(plan)
 

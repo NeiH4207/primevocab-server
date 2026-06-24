@@ -19,6 +19,15 @@ from aiforen.domain.vocab_daily_streak import (
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
+_CEFR_DEFAULT_BAND: Dict[str, float] = {
+    "A1": 3.0,
+    "A2": 4.0,
+    "B1": 5.5,
+    "B2": 6.5,
+    "C1": 7.5,
+    "C2": 8.5,
+}
+
 
 def _uuid(value: str | uuid.UUID) -> uuid.UUID:
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
@@ -162,9 +171,36 @@ class UserStatsRepo:
             "calibration_completed_at",
             "calibration_cefr_level",
             "calibration_insight",
+            "level_source",
+            "level_changed_at",
         ):
             profile.pop(key, None)
         await self._update(user_id, vocab_profile=profile)
+        return await self.get_or_default(user_id)
+
+    async def set_vocab_coaching_level(
+        self,
+        user_id: str,
+        *,
+        cefr_level: str,
+        source: str = "manual",
+    ) -> Dict[str, Any]:
+        """Set coaching CEFR without forcing a full calibration reset."""
+        existing = await self.get_or_default(user_id)
+        profile = dict(existing.get("vocab_profile") or {})
+        profile["calibration_completed"] = True
+        profile["calibration_cefr_level"] = cefr_level
+        profile["level_source"] = source
+        profile["level_changed_at"] = datetime.utcnow().isoformat()
+        if not profile.get("calibration_completed_at"):
+            profile["calibration_completed_at"] = profile["level_changed_at"]
+        band = float(_CEFR_DEFAULT_BAND.get(cefr_level.upper(), 5.5))
+        profile["current_band"] = band
+        await self._update(
+            user_id,
+            vocab_profile=profile,
+            estimated_vocab_band=band,
+        )
         return await self.get_or_default(user_id)
 
     def _pack_mastery_map(self, stats: Dict[str, Any]) -> Dict[str, Any]:

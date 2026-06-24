@@ -2,6 +2,7 @@
 
 from aiforen.integrations.llm.json_utils import (
     build_vocab_quiz_eval_prompt,
+    extract_json,
     normalize_vocab_quiz_ai_feedback,
 )
 
@@ -81,3 +82,19 @@ def test_normalize_clears_explanation_at_max_score():
     assert result["score"] == 5
     assert "score_explanation" not in result
     assert "score_breakdown" not in result
+
+
+def test_extract_json_parses_markdown_fenced_payload():
+    raw = '```json\n{"status": "ok", "score": 4}\n```'
+    assert extract_json(raw) == {"status": "ok", "score": 4}
+
+
+def test_extract_json_extracts_object_from_prose():
+    raw = 'Here is the result:\n{"status": "ok", "passed": true}\nThanks!'
+    assert extract_json(raw)["status"] == "ok"
+    assert extract_json(raw)["passed"] is True
+
+
+def test_extract_json_repairs_trailing_commas():
+    raw = '{"status": "ok", "score": 4,}'
+    assert extract_json(raw) == {"status": "ok", "score": 4}

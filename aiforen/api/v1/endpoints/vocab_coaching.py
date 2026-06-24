@@ -1,4 +1,4 @@
-"""Vocab Coaching endpoints — 31-day adaptive plan, reading, DB-first lookup, AI."""
+"""Vocab Coaching endpoints — 30-day adaptive plan, reading, DB-first lookup, AI."""
 
 from __future__ import annotations
 
@@ -379,6 +379,29 @@ async def coaching_complete(
         return _ok(
             await _svc(pg).complete_day(
                 user_id=user.id, day_number=day_number, locale=locale
+            )
+        )
+    except ValueError as exc:
+        raise _guard(exc)
+
+
+class CoachingChangeLevelIn(BaseModel):
+    cefr_level: str = Field(..., min_length=2, max_length=2)
+
+
+@router.post("/change-level")
+async def coaching_change_level(
+    body: CoachingChangeLevelIn,
+    locale: str = Query("en", min_length=2, max_length=8),
+    user: CurrentUser = Depends(get_current_user),
+    pg: AsyncSession = Depends(get_pg),
+):
+    try:
+        return _ok(
+            await _svc(pg).change_level(
+                user_id=user.id,
+                cefr_level=body.cefr_level,
+                locale=locale,
             )
         )
     except ValueError as exc:

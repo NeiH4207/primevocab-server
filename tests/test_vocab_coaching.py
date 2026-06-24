@@ -35,7 +35,9 @@ from aiforen.services.vocab_coaching_service import (
     _coaching_word_meets_plan_level,
     _confidence_pct,
     _ielts_band,
+    _is_legacy_generic_day_title,
     _reading_vocab_candidates_stale,
+    _resolve_day_reading_title,
 )
 
 
@@ -117,6 +119,26 @@ def test_total_days_and_levels():
     assert READING_DAY_COUNT == 12
     assert len(get_reading_seed(12)["paragraphs"]) >= 5
     assert CEFR_LEVELS[:2] == ["A1", "A2"]
+
+
+def test_resolve_day_reading_title_prefers_catalog_and_flags_legacy_titles():
+    catalog = {1: "Building a Study Habit", 2: "City Trees and Urban Heat"}
+    assert (
+        _resolve_day_reading_title("B1", 1, catalog_titles=catalog)
+        == "Building a Study Habit"
+    )
+    assert (
+        _resolve_day_reading_title(
+            "B1",
+            1,
+            catalog_titles=catalog,
+            reading={"title": "From snapshot"},
+        )
+        == "From snapshot"
+    )
+    assert _is_legacy_generic_day_title("Day 1 · Establish your vocabulary rhythm")
+    assert _is_legacy_generic_day_title("Day 4 · Adaptive focus")
+    assert not _is_legacy_generic_day_title("City Trees and Urban Heat")
 
 
 def test_recall_prompts_and_previews():

@@ -28,6 +28,16 @@ class CoachingContentRepo:
         )
         return int(row.scalar_one() or 0)
 
+    async def list_published_unit_titles(self, cefr_level: str) -> Dict[int, str]:
+        level = (cefr_level or "").upper()
+        rows = await self.s.execute(
+            select(CoachingReadingUnit.day_number, CoachingReadingUnit.title).where(
+                CoachingReadingUnit.cefr_level == level,
+                CoachingReadingUnit.status == "published",
+            )
+        )
+        return {int(day_number): str(title) for day_number, title in rows.all()}
+
     async def get_published_unit(
         self, cefr_level: str, day_number: int
     ) -> Optional[CoachingReadingUnit]:

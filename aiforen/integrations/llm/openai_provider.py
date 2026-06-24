@@ -16,7 +16,6 @@ from .json_utils import (
     build_reading_questions_prompt,
     build_vocab_calibration_prompt,
     build_vocab_daily_mission_prompt,
-    build_vocab_eval_prompt,
     build_vocab_quiz_eval_prompt,
     extract_json,
     normalize_coaching_notes_payload,
@@ -24,11 +23,60 @@ from .json_utils import (
     normalize_reading_questions_payload,
     normalize_vocab_calibration_payload,
     normalize_vocab_daily_mission_payload,
-    normalize_vocab_eval_payload,
     normalize_vocab_quiz_ai_feedback,
     normalize_writing_assessment,
 )
-from .openai_chat import openai_responses_text
+from .openai_chat import openai_chat_completion_text, openai_responses_text
+
+
+async def _openai_extract_json_payload(
+    client: AsyncOpenAI,
+    *,
+    model: str,
+    prompt: str,
+    max_output_tokens: int,
+    temperature: float,
+    log_label: str,
+) -> Dict[str, Any]:
+    """Call OpenAI and parse JSON with retries and chat JSON-mode fallback."""
+    last_exc: Exception | None = None
+    suffixes = ("", "\n\nReturn ONLY valid JSON, no markdown.")
+
+    for attempt, suffix in enumerate(suffixes, start=1):
+        try:
+            text = await openai_responses_text(
+                client,
+                model=model,
+                input=prompt + suffix,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+            )
+            return extract_json(text)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "{} JSON parse attempt {} failed: {}", log_label, attempt, exc
+            )
+
+    try:
+        text = await openai_chat_completion_text(
+            client,
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt + "\n\nReturn ONLY valid JSON."}
+            ],
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+        )
+        return extract_json(text)
+    except Exception as exc:  # noqa: BLE001
+        last_exc = exc
+        logger.warning("{} JSON mode fallback failed: {}", log_label, exc)
+
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError("Failed to extract JSON from LLM response")
 
 
 class OpenAILLMProvider(LLMProvider):
@@ -159,50 +207,6 @@ class OpenAILLMProvider(LLMProvider):
             context=context,
         )
 
-    async def evaluate_vocab_sentence(
-        self,
-        *,
-        word: str,
-        translate_prompt: str,
-        topic_prompt: str,
-        translate_sentence: str,
-        topic_sentence: str,
-        current_band: float,
-        target_band: float,
-        weakness_context: list[str] | None = None,
-    ) -> Dict[str, Any]:
-        settings = get_settings()
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing")
-
-        model = settings.openai_vocab_eval_model or settings.openai_model
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
-        prompt = build_vocab_eval_prompt(
-            word=word,
-            translate_prompt=translate_prompt,
-            topic_prompt=topic_prompt,
-            translate_sentence=translate_sentence,
-            topic_sentence=topic_sentence,
-            current_band=current_band,
-            target_band=target_band,
-            weakness_context=weakness_context,
-        )
-
-        logger.info("Vocab AI eval via OpenAI model={}", model)
-        text = await openai_responses_text(
-            client,
-            model=model,
-            input=prompt,
-            max_output_tokens=900,
-            temperature=0.1,
-        )
-        payload = extract_json(text)
-        return normalize_vocab_eval_payload(
-            payload,
-            translate_sentence=translate_sentence,
-            topic_sentence=topic_sentence,
-        )
-
     async def evaluate_vocab_quiz(
         self,
         *,
@@ -237,14 +241,14 @@ class OpenAILLMProvider(LLMProvider):
         )
 
         logger.info("Vocab quiz AI eval via OpenAI model={}", model)
-        text = await openai_responses_text(
+        payload = await _openai_extract_json_payload(
             client,
             model=model,
-            input=eval_prompt,
+            prompt=eval_prompt,
             max_output_tokens=700,
             temperature=0.1,
+            log_label="Vocab quiz eval",
         )
-        payload = extract_json(text)
         return normalize_vocab_quiz_ai_feedback(
             payload,
             learner_answer=learner_answer,

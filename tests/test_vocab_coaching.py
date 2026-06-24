@@ -122,6 +122,10 @@ def test_total_days_and_levels():
 
 
 def test_resolve_day_reading_title_prefers_catalog_and_flags_legacy_titles():
+    assert (
+        _resolve_day_reading_title("B1", 1, catalog_titles={})
+        == "Building a Study Habit"
+    )
     catalog = {1: "Building a Study Habit", 2: "City Trees and Urban Heat"}
     assert (
         _resolve_day_reading_title("B1", 1, catalog_titles=catalog)

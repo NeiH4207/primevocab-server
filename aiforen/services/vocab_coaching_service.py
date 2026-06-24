@@ -25,6 +25,7 @@ from aiforen.domain.coaching_content import (
     should_refresh_reading_snapshot,
     unit_to_reading_payload,
 )
+from aiforen.domain.coaching_reading_titles import static_reading_titles
 from aiforen.domain.reading_coach_cache import (
     READING_COACH_PROMPT_VERSION,
     cache_key_from_selection,
@@ -158,6 +159,17 @@ def _is_legacy_generic_day_title(title: Optional[str]) -> bool:
     return any(marker in text for marker in _LEGACY_GENERIC_DAY_TITLE_MARKERS)
 
 
+def _merged_catalog_titles(
+    cefr_level: str,
+    db_titles: Optional[Dict[int, str]] = None,
+) -> Dict[int, str]:
+    """DB catalog wins; static embedded titles fill gaps (prod has no vocab_storage mount)."""
+    merged = dict(static_reading_titles(cefr_level))
+    if db_titles:
+        merged.update({int(k): str(v) for k, v in db_titles.items() if v})
+    return merged
+
+
 def _resolve_day_reading_title(
     cefr_level: str,
     day_number: int,
@@ -172,7 +184,8 @@ def _resolve_day_reading_title(
         and not _is_legacy_generic_day_title(reading_title)
     ):
         return reading_title
-    catalog_title = catalog_titles.get(day_number)
+    effective_catalog = _merged_catalog_titles(cefr_level, catalog_titles)
+    catalog_title = effective_catalog.get(day_number)
     if catalog_title:
         return catalog_title.strip()
     return (
@@ -315,7 +328,9 @@ class VocabCoachingService:
                 "mix": {"current": 10, "lower": 2, "stretch": 3},
             },
         )
-        catalog_titles = await self.content_repo.list_published_unit_titles(cefr)
+        catalog_titles = _merged_catalog_titles(
+            cefr, await self.content_repo.list_published_unit_titles(cefr)
+        )
         day_rows = []
         for number in range(1, TOTAL_DAYS + 1):
             day_rows.append(
@@ -354,7 +369,12 @@ class VocabCoachingService:
     ) -> bool:
         titles = catalog_titles
         if titles is None:
-            titles = await self.content_repo.list_published_unit_titles(plan.cefr_level)
+            titles = _merged_catalog_titles(
+                plan.cefr_level,
+                await self.content_repo.list_published_unit_titles(plan.cefr_level),
+            )
+        else:
+            titles = _merged_catalog_titles(plan.cefr_level, titles)
         resolved = _resolve_day_reading_title(
             plan.cefr_level,
             day.day_number,
@@ -366,9 +386,10 @@ class VocabCoachingService:
         stale_reading = not stored_reading_title or _is_legacy_generic_day_title(
             stored_reading_title
         )
-        if day.title == resolved and not stale_reading:
+        stale_day = _is_legacy_generic_day_title(day.title)
+        if day.title == resolved and not stale_reading and not stale_day:
             return False
-        if _is_legacy_generic_day_title(day.title) or stale_reading:
+        if stale_day or stale_reading or day.title != resolved:
             day.title = resolved
             if stored_reading_title != resolved:
                 reading = dict(reading)
@@ -381,8 +402,9 @@ class VocabCoachingService:
     async def _sync_plan_day_titles(
         self, plan: VocabCoachingPlan, days: Sequence[VocabCoachingDay]
     ) -> None:
-        catalog_titles = await self.content_repo.list_published_unit_titles(
-            plan.cefr_level
+        catalog_titles = _merged_catalog_titles(
+            plan.cefr_level,
+            await self.content_repo.list_published_unit_titles(plan.cefr_level),
         )
         for day in days:
             await self._sync_day_title(plan, day, catalog_titles=catalog_titles)
@@ -398,8 +420,9 @@ class VocabCoachingService:
     async def _plan_view(self, plan: VocabCoachingPlan) -> Dict[str, Any]:
         days = await self.repo.list_days(plan.id)
         await self._sync_plan_day_titles(plan, days)
-        catalog_titles = await self.content_repo.list_published_unit_titles(
-            plan.cefr_level
+        catalog_titles = _merged_catalog_titles(
+            plan.cefr_level,
+            await self.content_repo.list_published_unit_titles(plan.cefr_level),
         )
         timeline = []
         for day in days:
@@ -522,7 +545,12 @@ class VocabCoachingService:
             day.reading = reading
 
         reading_title = str((reading or {}).get("title") or "").strip()
-        if reading_title and day.title != reading_title:
+        if (
+            reading_title
+            and not _is_legacy_generic_day_title(reading_title)
+            and reading_title != "Reading content coming soon"
+            and day.title != reading_title
+        ):
             day.title = reading_title
             mutated = True
 
@@ -845,8 +873,9 @@ class VocabCoachingService:
             raise ValueError("Day not found")
 
         if day_number > plan.current_day:
-            catalog_titles = await self.content_repo.list_published_unit_titles(
-                plan.cefr_level
+            catalog_titles = _merged_catalog_titles(
+                plan.cefr_level,
+                await self.content_repo.list_published_unit_titles(plan.cefr_level),
             )
             display_title = _resolve_day_reading_title(
                 plan.cefr_level,
@@ -867,8 +896,9 @@ class VocabCoachingService:
         if day.status == "locked":
             day.status = "ready"
         await self._ensure_day_content(plan, day)
-        catalog_titles = await self.content_repo.list_published_unit_titles(
-            plan.cefr_level
+        catalog_titles = _merged_catalog_titles(
+            plan.cefr_level,
+            await self.content_repo.list_published_unit_titles(plan.cefr_level),
         )
         await self._sync_day_title(plan, day, catalog_titles=catalog_titles)
         display_title = _resolve_day_reading_title(

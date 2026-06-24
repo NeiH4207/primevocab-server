@@ -11,6 +11,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aiforen.domain.coaching_studied_level import (
+    normalize_studied_level,
+    studied_level_from_calibration_result,
+)
 from aiforen.domain.sql_models import UserLearningStats
 from aiforen.domain.vocab_daily_streak import (
     compute_daily_streak,
@@ -20,6 +24,7 @@ from aiforen.domain.vocab_daily_streak import (
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 _CEFR_DEFAULT_BAND: Dict[str, float] = {
+    "NEWBIE": 2.5,
     "A1": 3.0,
     "A2": 4.0,
     "B1": 5.5,
@@ -194,7 +199,9 @@ class UserStatsRepo:
         profile["calibration_completed_at"] = datetime.utcnow().isoformat()
         profile["level_source"] = "calibration"
         if cefr_level:
-            profile["calibration_cefr_level"] = cefr_level
+            profile["calibration_cefr_level"] = studied_level_from_calibration_result(
+                cefr_level
+            )
         if calibration_insight:
             profile["calibration_insight"] = calibration_insight
         updates: Dict[str, Any] = {"vocab_profile": profile}
@@ -228,23 +235,24 @@ class UserStatsRepo:
         cefr_level: str,
         source: str = "manual",
     ) -> Dict[str, Any]:
-        """Set coaching CEFR without forcing a full calibration reset."""
+        """Set coaching studied level without forcing a full calibration reset."""
         existing = await self.get_or_default(user_id)
         profile = dict(existing.get("vocab_profile") or {})
+        studied = normalize_studied_level(cefr_level)
         profile["calibration_completed"] = True
-        profile["calibration_cefr_level"] = cefr_level
+        profile["calibration_cefr_level"] = studied
         profile["level_source"] = source
         profile["level_changed_at"] = datetime.utcnow().isoformat()
         if not profile.get("calibration_completed_at"):
             profile["calibration_completed_at"] = profile["level_changed_at"]
         confidence_pct = _confidence_for_level_change(
-            profile, cefr_level=cefr_level, source=source
+            profile, cefr_level=studied, source=source
         )
         insight = dict(profile.get("calibration_insight") or {})
         insight["confidence"] = confidence_pct / 100.0
         insight["source"] = source
         profile["calibration_insight"] = insight
-        band = float(_CEFR_DEFAULT_BAND.get(cefr_level.upper(), 5.5))
+        band = float(_CEFR_DEFAULT_BAND.get(studied, 5.5))
         profile["current_band"] = band
         await self._update(
             user_id,

@@ -26,6 +26,12 @@ from aiforen.domain.coaching_content import (
     unit_to_reading_payload,
 )
 from aiforen.domain.coaching_reading_titles import static_reading_titles
+from aiforen.domain.coaching_studied_level import (
+    STUDIED_COACHING_LEVELS,
+    content_cefr_for_studied,
+    normalize_studied_level,
+    studied_cefr_from_content,
+)
 from aiforen.domain.reading_coach_cache import (
     READING_COACH_PROMPT_VERSION,
     cache_key_from_selection,
@@ -65,6 +71,7 @@ TOTAL_DAYS = 30
 COACHING_C2_RELEASE_DAYS = 30
 
 _IELTS_BAND = {
+    "NEWBIE": 2.5,
     "A1": 3.5,
     "A2": 4.5,
     "B1": 5.5,
@@ -73,6 +80,7 @@ _IELTS_BAND = {
     "C2": 8.5,
 }
 _IELTS_RANGE = {
+    "NEWBIE": "IELTS vocabulary ~2.5–3.5",
     "A1": "IELTS vocabulary ~3.0–4.0",
     "A2": "IELTS vocabulary ~4.0–4.5",
     "B1": "IELTS vocabulary ~5.0–5.5",
@@ -288,7 +296,7 @@ class VocabCoachingService:
         profile = stats.get("vocab_profile") or {}
         if not profile.get("calibration_completed"):
             stats = await self.stats.set_vocab_coaching_level(
-                user_id, cefr_level="B1", source="default"
+                user_id, cefr_level="NEWBIE", source="default"
             )
             profile = stats.get("vocab_profile") or {}
         return profile
@@ -309,37 +317,40 @@ class VocabCoachingService:
     async def _create_plan_from_calibration(
         self, user_id: str, profile: Dict[str, Any]
     ) -> VocabCoachingPlan:
-        cefr = str(profile.get("calibration_cefr_level") or "B1").upper()
-        if cefr not in CEFR_LEVELS:
-            cefr = "B1"
-        if cefr == "C2":
+        studied = normalize_studied_level(profile.get("calibration_cefr_level"))
+        content_cefr = content_cefr_for_studied(studied)
+        if content_cefr == "C2":
             published = await self.content_repo.count_published_units("C2")
             if not _c2_coaching_released(published):
-                cefr = "C1"
+                content_cefr = "C1"
+                studied = "B2"
         insight = profile.get("calibration_insight") or {}
         confidence = _confidence_pct(insight.get("confidence"))
         band = profile.get("current_band")
         try:
-            band = float(band) if band is not None else _ielts_band(cefr)
+            band = float(band) if band is not None else _ielts_band(studied)
         except (TypeError, ValueError):
-            band = _ielts_band(cefr)
+            band = _ielts_band(studied)
 
         await self.repo.archive_active_plans(user_id)
         plan = await self.repo.create_plan(
             user_id=user_id,
-            cefr_level=cefr,
+            cefr_level=content_cefr,
             estimated_band=band,
             confidence=confidence,
             source=str(profile.get("level_source") or "calibration"),
             start_date=datetime.now(VN_TZ).date(),
             total_days=TOTAL_DAYS,
             meta={
-                "ielts_range": _ielts_range(cefr),
+                "studied_cefr_level": studied,
+                "content_cefr_level": content_cefr,
+                "ielts_range": _ielts_range(studied),
                 "mix": {"current": 10, "lower": 2, "stretch": 3},
             },
         )
         catalog_titles = _merged_catalog_titles(
-            cefr, await self.content_repo.list_published_unit_titles(cefr)
+            content_cefr,
+            await self.content_repo.list_published_unit_titles(content_cefr),
         )
         day_rows = []
         for number in range(1, TOTAL_DAYS + 1):
@@ -348,7 +359,7 @@ class VocabCoachingService:
                     "day_number": number,
                     "status": "ready" if number == 1 else "locked",
                     "title": _resolve_day_reading_title(
-                        cefr,
+                        content_cefr,
                         number,
                         catalog_titles=catalog_titles,
                     ),
@@ -356,7 +367,7 @@ class VocabCoachingService:
                     "analysis": (
                         {}
                         if number == 1
-                        else {"preview": self._locked_preview(number, cefr)}
+                        else {"preview": self._locked_preview(number, content_cefr)}
                     ),
                 }
             )
@@ -462,7 +473,8 @@ class VocabCoachingService:
             "plan": {
                 "id": str(plan.id),
                 "status": plan.status,
-                "cefr_level": plan.cefr_level,
+                "cefr_level": self._plan_studied_level(plan),
+                "content_cefr_level": plan.cefr_level,
                 "estimated_band": (
                     float(plan.estimated_band)
                     if plan.estimated_band is not None
@@ -476,7 +488,7 @@ class VocabCoachingService:
                 "current_day": plan.current_day,
                 "total_days": plan.total_days,
                 "ielts_range": (plan.meta or {}).get("ielts_range")
-                or _ielts_range(plan.cefr_level),
+                or _ielts_range(self._plan_studied_level(plan)),
                 "mix": (plan.meta or {}).get("mix")
                 or {"current": 10, "lower": 2, "stretch": 3},
             },
@@ -947,7 +959,7 @@ class VocabCoachingService:
             "title": display_title,
             "reading_title": display_title,
             "focus_skill": day.focus_skill,
-            "cefr_level": plan.cefr_level,
+            "cefr_level": self._plan_studied_level(plan),
             "words": words,
             "reading": day.reading or {},
             "recall": recall,
@@ -1449,7 +1461,7 @@ class VocabCoachingService:
         paragraph = str(paragraphs[idx] if paragraphs else "")
         context = {
             "locale": locale,
-            "level": plan.cefr_level,
+            "level": self._plan_studied_level(plan),
             "title": reading.get("title"),
             "paragraph": paragraph,
             "recent_actions": self._recent_actions_for_helper(recent_actions or []),
@@ -1521,9 +1533,10 @@ class VocabCoachingService:
             events=persisted,
             recent_actions=recent,
         )
+        studied_level = self._plan_studied_level(plan)
         context = {
             "locale": locale,
-            "level": (reading_selection or {}).get("user_level") or plan.cefr_level,
+            "level": (reading_selection or {}).get("user_level") or studied_level,
             "title": (reading_selection or {}).get("passage_title")
             or reading.get("title"),
             "paragraphs": para_payload,
@@ -1543,7 +1556,7 @@ class VocabCoachingService:
             reading_selection=reading_selection,
             locale=locale,
             user_level=str(
-                (reading_selection or {}).get("user_level") or plan.cefr_level
+                (reading_selection or {}).get("user_level") or studied_level
             ),
             model_name=model,
         )
@@ -1698,7 +1711,7 @@ class VocabCoachingService:
         )
         signals = await self._action_signals(plan.id, day_number)
         context = {
-            "level": plan.cefr_level,
+            "level": self._plan_studied_level(plan),
             "phrase": clean_phrase,
             "sentence": clean_sentence,
             "paragraph": paragraph[:1800],
@@ -1710,7 +1723,10 @@ class VocabCoachingService:
         except Exception as exc:  # noqa: BLE001 — graceful fallback
             logger.warning("coaching explain_phrase LLM failed: {}", exc)
             result = normalize_reading_explain_payload(
-                {}, phrase=clean_phrase, sentence=clean_sentence, level=plan.cefr_level
+                {},
+                phrase=clean_phrase,
+                sentence=clean_sentence,
+                level=self._plan_studied_level(plan),
             )
         await self.repo.record_events(
             plan=plan,
@@ -1746,7 +1762,7 @@ class VocabCoachingService:
         fallback = seeded
         passage = "\n\n".join(str(p) for p in (reading.get("paragraphs") or []))
         context = {
-            "level": plan.cefr_level,
+            "level": self._plan_studied_level(plan),
             "title": reading.get("title"),
             "passage": passage,
             "count": count,
@@ -1786,7 +1802,7 @@ class VocabCoachingService:
             plan.id, day_number, "recall_answer"
         )
         context = {
-            "level": plan.cefr_level,
+            "level": self._plan_studied_level(plan),
             "day_number": day_number,
             "locale": locale,
             "reading_correct": reading_correct,
@@ -2052,21 +2068,24 @@ class VocabCoachingService:
     async def change_level(
         self, *, user_id: str, cefr_level: str, locale: str = "en"
     ) -> Dict[str, Any]:
-        """Switch coaching CEFR and rebuild the 30-day plan (progress resets)."""
+        """Switch studied coaching level and rebuild the 30-day plan (progress resets)."""
         _ = locale
-        cefr = str(cefr_level or "").strip().upper()
-        if cefr not in CEFR_LEVELS:
-            raise ValueError("Invalid CEFR level")
-        if cefr == "C2":
-            published = await self.content_repo.count_published_units("C2")
-            if not _c2_coaching_released(published):
-                cefr = "C1"
+        studied = normalize_studied_level(cefr_level)
+        if studied not in STUDIED_COACHING_LEVELS:
+            raise ValueError("Invalid coaching level")
         stats = await self.stats.set_vocab_coaching_level(
-            user_id, cefr_level=cefr, source="manual"
+            user_id, cefr_level=studied, source="manual"
         )
         profile = stats.get("vocab_profile") or {}
         plan = await self._create_plan_from_calibration(user_id, profile)
         return await self._plan_view(plan)
+
+    def _plan_studied_level(self, plan: VocabCoachingPlan) -> str:
+        meta = plan.meta if isinstance(plan.meta, dict) else {}
+        stored = meta.get("studied_cefr_level")
+        if stored:
+            return normalize_studied_level(str(stored))
+        return studied_cefr_from_content(plan.cefr_level)
 
     def _recent_actions_for_helper(
         self, recent_actions: Sequence[Dict[str, Any]]

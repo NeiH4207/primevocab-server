@@ -386,7 +386,7 @@ async def coaching_complete(
 
 
 class CoachingChangeLevelIn(BaseModel):
-    cefr_level: str = Field(..., min_length=2, max_length=2)
+    cefr_level: str = Field(..., min_length=2, max_length=6)
 
 
 @router.post("/change-level")

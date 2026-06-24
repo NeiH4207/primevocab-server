@@ -136,6 +136,24 @@ def test_resolve_day_reading_title_prefers_catalog_and_flags_legacy_titles():
         )
         == "From snapshot"
     )
+    assert (
+        _resolve_day_reading_title(
+            "B1",
+            1,
+            catalog_titles=catalog,
+            reading={"title": "Day 1 · Establish your vocabulary rhythm"},
+        )
+        == "Building a Study Habit"
+    )
+    assert (
+        _resolve_day_reading_title(
+            "B1",
+            2,
+            catalog_titles=catalog,
+            reading={"title": "Reading content coming soon"},
+        )
+        == "City Trees and Urban Heat"
+    )
     assert _is_legacy_generic_day_title("Day 1 · Establish your vocabulary rhythm")
     assert _is_legacy_generic_day_title("Day 4 · Adaptive focus")
     assert not _is_legacy_generic_day_title("City Trees and Urban Heat")

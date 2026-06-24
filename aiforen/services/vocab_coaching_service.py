@@ -166,7 +166,11 @@ def _resolve_day_reading_title(
     reading: Optional[Dict[str, Any]] = None,
 ) -> str:
     reading_title = str((reading or {}).get("title") or "").strip()
-    if reading_title and reading_title != "Reading content coming soon":
+    if (
+        reading_title
+        and reading_title != "Reading content coming soon"
+        and not _is_legacy_generic_day_title(reading_title)
+    ):
         return reading_title
     catalog_title = catalog_titles.get(day_number)
     if catalog_title:
@@ -357,12 +361,19 @@ class VocabCoachingService:
             catalog_titles=titles,
             reading=day.reading if isinstance(day.reading, dict) else None,
         )
-        if day.title == resolved:
+        reading = day.reading if isinstance(day.reading, dict) else {}
+        stored_reading_title = str(reading.get("title") or "").strip()
+        stale_reading = not stored_reading_title or _is_legacy_generic_day_title(
+            stored_reading_title
+        )
+        if day.title == resolved and not stale_reading:
             return False
-        if _is_legacy_generic_day_title(day.title) or not (day.reading or {}).get(
-            "title"
-        ):
+        if _is_legacy_generic_day_title(day.title) or stale_reading:
             day.title = resolved
+            if stored_reading_title != resolved:
+                reading = dict(reading)
+                reading["title"] = resolved
+                day.reading = reading
             await self.s.flush()
             return True
         return False
@@ -856,6 +867,16 @@ class VocabCoachingService:
         if day.status == "locked":
             day.status = "ready"
         await self._ensure_day_content(plan, day)
+        catalog_titles = await self.content_repo.list_published_unit_titles(
+            plan.cefr_level
+        )
+        await self._sync_day_title(plan, day, catalog_titles=catalog_titles)
+        display_title = _resolve_day_reading_title(
+            plan.cefr_level,
+            day_number,
+            catalog_titles=catalog_titles,
+            reading=day.reading if isinstance(day.reading, dict) else None,
+        )
 
         recall: Dict[str, Any]
         if day_number == 1:
@@ -883,7 +904,8 @@ class VocabCoachingService:
             "locked": False,
             "day_number": day.day_number,
             "status": day.status,
-            "title": day.title,
+            "title": display_title,
+            "reading_title": display_title,
             "focus_skill": day.focus_skill,
             "cefr_level": plan.cefr_level,
             "words": words,
